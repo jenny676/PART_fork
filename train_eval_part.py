@@ -263,10 +263,16 @@ def main():
         os.makedirs(model_dir)
 
     # try resume
-    weighted_eps_list = np.load(path, allow_pickle=True)
-    weighted_eps_list = [
-        torch.from_numpy(w).to(device) for w in weighted_eps_list
-    ]
+    weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
+
+    if os.path.exists(weighted_eps_path):
+        print("Loading weighted_eps_list from", weighted_eps_path)
+        weighted_eps_np = np.load(weighted_eps_path, allow_pickle=True)
+        weighted_eps_list = [
+            torch.from_numpy(w).to(device) for w in weighted_eps_np
+        ]
+    else:
+        weighted_eps_list = None
 
     # warm up phase
     warmup_start = start_epoch if start_epoch <= args.warm_up else args.warm_up + 1
@@ -346,6 +352,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
