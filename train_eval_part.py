@@ -17,6 +17,80 @@ from dataset.svhn import SVHN
 
 from utils import *
 
+import tempfile
+import shutil
+
+def safe_numpy_save(path, arr, allow_pickle=True):
+    """Atomically save arr to path using a temp file and os.replace()."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=d, prefix='.tmp_save_', suffix='.npy')
+    os.close(fd)
+    try:
+        with open(tmp_path, 'wb') as f:
+            np.save(f, arr, allow_pickle=allow_pickle)
+        os.replace(tmp_path, path)  # atomic on POSIX
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args):
+    """Try to load weighted_eps; if missing/corrupt, recompute and save atomically."""
+    def recompute_and_save():
+        print("Recomputing weighted_eps_list via save_cam(...)")
+        w = save_cam(model, train_loader, device, args)
+        # convert tensors to CPU numpy arrays for storage
+        w_cpu = []
+        for t in w:
+            if torch.is_tensor(t):
+                w_cpu.append(t.detach().cpu().numpy())
+            else:
+                # keep as is (if already numpy)
+                w_cpu.append(np.array(t, dtype=object))
+        safe_numpy_save(weighted_eps_path, np.array(w_cpu, dtype=object))
+        # return as list of torch tensors on device
+        return [torch.from_numpy(arr).to(device) for arr in w_cpu]
+
+    if not os.path.exists(weighted_eps_path):
+        print("weighted_eps file not found -> recomputing.")
+        return recompute_and_save()
+
+    # quick size check
+    if os.path.getsize(weighted_eps_path) == 0:
+        print("weighted_eps file is empty -> recomputing.")
+        try:
+            os.remove(weighted_eps_path)
+        except Exception:
+            pass
+        return recompute_and_save()
+
+    try:
+        arr = np.load(weighted_eps_path, allow_pickle=True)
+        if arr is None or len(arr) == 0:
+            print("Loaded arr empty -> recomputing.")
+            return recompute_and_save()
+        # convert to torch tensors on device
+        result = []
+        for item in arr:
+            if isinstance(item, np.ndarray):
+                result.append(torch.from_numpy(item).to(device))
+            else:
+                # fallback attempt
+                try:
+                    tmp = np.array(item, dtype=object)
+                    result.append(torch.from_numpy(tmp).to(device))
+                except Exception:
+                    print("Element conversion failed -> recomputing.")
+                    return recompute_and_save()
+        print("Loaded weighted_eps_list from", weighted_eps_path)
+        return result
+    except (EOFError, ValueError, Exception) as e:
+        print("Failed to load weighted_eps_list:", repr(e))
+        return recompute_and_save()
+
 
 parser = argparse.ArgumentParser(description='PyTorch Pixel-reweighted Adversarial Training')
 
@@ -352,6 +426,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
