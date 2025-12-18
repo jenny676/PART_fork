@@ -144,32 +144,26 @@ def main():
     if args.data == 'CIFAR10':
         train_loader = CIFAR10(train_batch_size=args.batch_size).train_data()
         test_loader = CIFAR10(test_batch_size=args.batch_size).test_data()
-      if args.train_percent < 100.0:
-          assert 0.0 < args.train_percent <= 100.0, "train-percent must be in (0,100]"
-          # get underlying dataset
-          train_dataset = train_loader.dataset
-          num_train = len(train_dataset)
-          num_use = max(1, int(num_train * (args.train_percent / 100.0)))
-          # deterministic sampling if seed is set
-          g = torch.Generator()
-          g.manual_seed(args.seed)
+    if args.train_percent < 100.0:
+        assert 0.0 < args.train_percent <= 100.0, "train-percent must be in (0,100]"
+        # get underlying dataset
+        train_dataset = train_loader.dataset
+        num_train = len(train_dataset)
+        num_use = max(1, int(num_train * (args.train_percent / 100.0)))
+        # deterministic sampling if seed is set
+        g = torch.Generator()
+        g.manual_seed(args.seed)
       
-          # random indices, then subset
-          perm = torch.randperm(num_train, generator=g)[:num_use].tolist()
-          from torch.utils.data import Subset
-          train_subset = Subset(train_dataset, perm)
+        # random indices, then subset
+        perm = torch.randperm(num_train, generator=g)[:num_use].tolist()
+        from torch.utils.data import Subset
+        train_subset = Subset(train_dataset, perm)
       
-          # re-create train_loader with the same loader params but using the subset
-          # reuse commonly used args from the existing loader
-          train_loader = torch.utils.data.DataLoader(
-              train_subset,
-              batch_size=getattr(train_loader, 'batch_size', args.batch_size),
-              shuffle=True,  # keep shuffle True for training subset
-              num_workers=getattr(train_loader, 'num_workers', 4),
-              pin_memory=getattr(train_loader, 'pin_memory', True),
-              drop_last=getattr(train_loader, 'drop_last', False)
-          )
-          print(f"Using {num_use}/{num_train} training samples ({args.train_percent}%) for training")
+        # re-create train_loader with the same loader params but using the subset
+        # reuse commonly used args from the existing loader
+        train_loader = torch.utils.data.DataLoader(train_subset, batch_size=getattr(train_loader, 'batch_size', args.batch_size), shuffle=True, 
+                                                   num_workers=getattr(train_loader, 'num_workers', 4), pin_memory=getattr(train_loader, 'pin_memory', True), drop_last=getattr(train_loader, 'drop_last', False))
+        print(f"Using {num_use}/{num_train} training samples ({args.train_percent}%) for training")
 
         if args.model == 'resnet':
             model_dir = './checkpoint/CIFAR10/ResNet_18/PART'
@@ -251,6 +245,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
