@@ -19,6 +19,12 @@ parser = argparse.ArgumentParser(description='PyTorch Pixel-reweighted Adversari
 
 parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='input batch size for training (default: 128)')
+parser.add_argument(
+    '--train-percent',
+    type=float,
+    default=100.0,
+    help='Percent of training data to use (0 < p <= 100)'
+)
 parser.add_argument('--epochs', type=int, default=80, metavar='N',
                     help='number of epochs to train')
 parser.add_argument('--weight-decay', '--wd', default=2e-4, type=float, metavar='W')
@@ -222,4 +228,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
