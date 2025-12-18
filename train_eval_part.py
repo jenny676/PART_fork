@@ -338,16 +338,8 @@ def main():
 
     # try resume
     weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
-
-    if os.path.exists(weighted_eps_path):
-        print("Loading weighted_eps_list from", weighted_eps_path)
-        weighted_eps_np = np.load(weighted_eps_path, allow_pickle=True)
-        weighted_eps_list = [
-            torch.from_numpy(w).to(device) for w in weighted_eps_np
-        ]
-    else:
-        weighted_eps_list = None
-
+    weighted_eps_list = safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
+    
     # warm up phase
     warmup_start = start_epoch if start_epoch <= args.warm_up else args.warm_up + 1
     if warmup_start <= args.warm_up:
@@ -373,7 +365,7 @@ def main():
 
         weighted_eps_list_cpu = [to_cpu_numpy(w) for w in weighted_eps_list]
 
-        np.save(
+        safe_numpy_save(
             os.path.join(model_dir, 'weighted_eps_latest.npy'),
             np.array(weighted_eps_list_cpu, dtype=object),
             allow_pickle=True
@@ -394,11 +386,28 @@ def main():
         main_epoch_start = start_epoch - args.warm_up
 
     for main_epoch in range(main_epoch_start, total_main_epochs + 1):
-        # optionally recompute weighted_eps_list periodically
-        if main_epoch % args.save_weights == 0 and main_epoch != 1:
-            weighted_eps_list = save_cam(model, train_loader, device, args)
-            np.save(os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'), weighted_eps_list)
-            np.save(os.path.join(model_dir, 'weighted_eps_latest.npy'), weighted_eps_list)
+    # optionally recompute weighted_eps_list periodically
+    if main_epoch % args.save_weights == 0 and main_epoch != 1:
+        weighted_eps_list = save_cam(model, train_loader, device, args)
+
+        # convert to CPU numpy objects for safe storage
+        w_cpu = []
+        for w in weighted_eps_list:
+            if torch.is_tensor(w):
+                w_cpu.append(w.detach().cpu().numpy())
+            else:
+                w_cpu.append(np.array(w, dtype=object))
+
+        # atomic saves: per-epoch and latest
+        safe_numpy_save(
+            os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'),
+            np.array(w_cpu, dtype=object)
+        )
+        safe_numpy_save(
+            os.path.join(model_dir, 'weighted_eps_latest.npy'),
+            np.array(w_cpu, dtype=object)
+        )
+        print(f"Saved weighted_eps for epoch {main_epoch}")
 
         # adjust learning rate
         adjust_learning_rate(args, optimizer, main_epoch)
@@ -426,6 +435,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
