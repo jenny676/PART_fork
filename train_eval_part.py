@@ -156,10 +156,9 @@ args = parser.parse_args()
 
 
 def save_checkpoint(path, model, optimizer, epoch):
-    """Save model+optimizer+rng to path"""
     payload = {
         'epoch': epoch,
-        'model_state': model.state_dict(),
+        'model_state': model.state_dict(),       
         'optimizer_state': optimizer.state_dict(),
         'rng_state': torch.get_rng_state()
     }
@@ -337,6 +336,7 @@ def main():
         os.makedirs(model_dir)
 
     # try resume
+    start_epoch, _ = try_resume(model, optimizer, model_dir, device)
     weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
     weighted_eps_list = safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
     
@@ -386,43 +386,38 @@ def main():
         main_epoch_start = start_epoch - args.warm_up
 
     for main_epoch in range(main_epoch_start, total_main_epochs + 1):
-    # optionally recompute weighted_eps_list periodically
-    if main_epoch % args.save_weights == 0 and main_epoch != 1:
-        weighted_eps_list = save_cam(model, train_loader, device, args)
-
-        # convert to CPU numpy objects for safe storage
-        w_cpu = []
-        for w in weighted_eps_list:
-            if torch.is_tensor(w):
-                w_cpu.append(w.detach().cpu().numpy())
-            else:
-                w_cpu.append(np.array(w, dtype=object))
-
-        # atomic saves: per-epoch and latest
-        safe_numpy_save(
-            os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'),
-            np.array(w_cpu, dtype=object)
-        )
-        safe_numpy_save(
-            os.path.join(model_dir, 'weighted_eps_latest.npy'),
-            np.array(w_cpu, dtype=object)
-        )
-        print(f"Saved weighted_eps for epoch {main_epoch}")
-
-        # adjust learning rate
+        # optionally recompute weighted_eps_list periodically
+        if main_epoch % args.save_weights == 0 and main_epoch != 1:
+            weighted_eps_list = save_cam(model, train_loader, device, args)
+            # convert to CPU numpy objects for safe storage
+            w_cpu = []
+            for w in weighted_eps_list:
+                if torch.is_tensor(w):
+                    w_cpu.append(w.detach().cpu().numpy())
+                else:
+                    w_cpu.append(np.array(w, dtype=object))
+            # atomic saves: per-epoch and latest
+            safe_numpy_save(os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'),
+                            np.array(w_cpu, dtype=object))
+            safe_numpy_save(os.path.join(model_dir, 'weighted_eps_latest.npy'),
+                            np.array(w_cpu, dtype=object))
+            print(f"Saved weighted_eps for epoch {main_epoch}")
+    
+        # adjust learning rate for this epoch
         adjust_learning_rate(args, optimizer, main_epoch)
-
-        # adversarial training
+    
+        # adversarial training for this epoch
         train(args, model, device, train_loader, optimizer, main_epoch, weighted_eps_list)
-
+    
         # save checkpoint (per epoch) and latest
         epoch_global = args.warm_up + main_epoch
         save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
         torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
         if epoch_global % args.save_freq == 0:
             print('saved model at global epoch', epoch_global)
-
+    
         print('================================================================')
+
 
     # evaluation on adversarial examples
     print('PGD=============================================================')
@@ -435,6 +430,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
