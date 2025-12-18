@@ -104,6 +104,8 @@ parser.add_argument(
 )
 parser.add_argument('--epochs', type=int, default=80, metavar='N',
                     help='number of epochs to train (total, including warm-up)')
+parser.add_argument('--eval-modes', type=str, default='all',
+                    help="Comma-separated eval modes to run: 'pgd', 'mma', 'aa', or 'all' (default)")
 parser.add_argument('--weight-decay', '--wd', default=2e-4, type=float, metavar='W')
 parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
                     help='learning rate')
@@ -420,16 +422,23 @@ def main():
 
 
     # evaluation on adversarial examples
-    print('PGD=============================================================')
-    eval_test(args, model, device, test_loader, mode='pgd')
-    print('MMA==============================================================')
-    eval_test(args, model, device, test_loader, mode='mma')
-    print('AA==============================================================')
-    eval_test(args, model, device, test_loader, mode='aa')
+    modes = args.eval_modes.split(',')
+    modes = [m.strip().lower() for m in modes]
+    if 'all' in modes:
+        modes = ['pgd','mma','aa']
+    
+    for mode in modes:
+        if mode not in ('pgd','mma','aa'):
+            print("Unknown eval mode:", mode)
+            continue
+        print(f'{mode.upper()}=============================================================')
+        eval_test(args, model, device, test_loader, mode=mode)
+
 
 
 if __name__ == '__main__':
     main()
+
 
 
 
