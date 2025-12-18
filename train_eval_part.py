@@ -263,7 +263,10 @@ def main():
         os.makedirs(model_dir)
 
     # try resume
-    start_epoch, weighted_eps_list = try_resume(model, optimizer, model_dir, device)
+    weighted_eps_list = np.load(path, allow_pickle=True)
+    weighted_eps_list = [
+        torch.from_numpy(w).to(device) for w in weighted_eps_list
+    ]
 
     # warm up phase
     warmup_start = start_epoch if start_epoch <= args.warm_up else args.warm_up + 1
@@ -283,7 +286,19 @@ def main():
     if weighted_eps_list is None:
         weighted_eps_list = save_cam(model, train_loader, device, args)
         # save latest weighted eps list
-        np.save(os.path.join(model_dir, 'weighted_eps_latest.npy'), weighted_eps_list)
+        def to_cpu_numpy(x):
+          if torch.is_tensor(x):
+            return x.detach().cpu().numpy()
+          return x
+
+        weighted_eps_list_cpu = [to_cpu_numpy(w) for w in weighted_eps_list]
+
+        np.save(
+            os.path.join(model_dir, 'weighted_eps_latest.npy'),
+            np.array(weighted_eps_list_cpu, dtype=object),
+            allow_pickle=True
+        )
+
     else:
         print("Using weighted_eps_list loaded from checkpoint")
 
@@ -331,6 +346,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
