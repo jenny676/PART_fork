@@ -272,6 +272,8 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         weighted_eps_list = np.load(weighted_eps_list, allow_pickle=True)
 
     model.train()
+    # DEBUG: confirm model is in train mode
+    print(f"DEBUG: train() called for epoch {epoch}; model.training = {model.training}")
     for batch_idx, (data, label) in enumerate(train_loader):
         # ensure tensors on right device and correct dtype for labels
         data = data.to(device, non_blocking=True)
@@ -314,6 +316,13 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         loss = F.cross_entropy(out, label)
         loss.backward()
         optimizer.step()
+        # DEBUG: light optimizer stepping check
+        try:
+            n_states = sum(1 for k in optimizer.state.keys())
+            print(f"DEBUG: after optimizer.step() - optimizer.state entries: {n_states}")
+        except Exception as e:
+            print("DEBUG: optimizer inspection failed:", repr(e))
+
 
         # print progress
         if batch_idx % args.log_interval == 0:
@@ -402,6 +411,25 @@ def main():
 
     # try resume
     start_epoch, _ = try_resume(model, optimizer, model_dir, device)
+    # ----------------- DEBUG: resume sanity checks -----------------
+    # Print start epoch and basic checkpoint/optimizer info
+    print("DEBUG: start_epoch =", start_epoch)
+    # Inspect optimizer state (quick, safe)
+    try:
+        ckpt_path = os.path.join(model_dir, 'latest.pth')
+        if os.path.exists(ckpt_path):
+            ck = torch.load(ckpt_path, map_location='cpu')
+            print("DEBUG: ckpt epoch:", ck.get('epoch'))
+            print("DEBUG: ckpt keys:", list(ck.keys()))
+            # quick optimizer state size check
+            st = ck.get('optimizer_state', {}).get('state', {})
+            print("DEBUG: optimizer_state entries (sample):", list(st.keys())[:5], "len=", len(st))
+        else:
+            print("DEBUG: no latest.pth found at", ckpt_path)
+    except Exception as e:
+        print("DEBUG: failed resume-inspect:", repr(e))
+    # ---------------------------------------------------------------
+
     weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
     weighted_eps_list = safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
     
@@ -489,7 +517,24 @@ def main():
     modes = [m.strip().lower() for m in modes]
     if 'all' in modes:
         modes = ['pgd','mma','aa']
-    
+
+    # ----------------- DEBUG: quick one-batch sanity check on test loader -----------------
+    print("DEBUG: running one-batch sanity check on test_loader")
+    model.eval()
+    try:
+        imgs, labels = next(iter(test_loader))
+        imgs, labels = imgs.to(device), labels.to(device)
+        with torch.no_grad():
+            preds = model(imgs).argmax(dim=1)
+        print("DEBUG: labels[:20]:", labels[:20].cpu().numpy())
+        print("DEBUG: preds [:20]:", preds[:20].cpu().numpy())
+        # quick counts
+        unique_preds = torch.unique(preds).cpu().numpy().tolist()
+        print("DEBUG: unique preds in batch (sample):", unique_preds)
+    except Exception as e:
+        print("DEBUG: one-batch sanity check failed:", repr(e))
+    # --------------------------------------------------------------------------------------
+
     for mode in modes:
         if mode not in ('pgd','mma','aa'):
             print("Unknown eval mode:", mode)
@@ -501,6 +546,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
