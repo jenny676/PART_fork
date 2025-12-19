@@ -456,7 +456,9 @@ def main():
 
     # create model, optimizer, wrap DataParallel
     model = model.to(device)
-    model = torch.nn.DataParallel(model)
+    if use_cuda and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+
     cudnn.benchmark = True
 
     optimizer = optim.SGD(model.parameters(),
@@ -623,6 +625,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
