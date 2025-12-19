@@ -284,7 +284,43 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
             weighted_eps = torch.from_numpy(weighted_eps_list[f'arr_{batch_idx}']).to(device)
         else:
             # if weighted_eps_list is a python list/np.array of same length as loader
-            weighted_eps = weighted_eps_list[batch_idx] if weighted_eps_list is not None else None
+            # ---- start robust weighted_eps selection ----
+            weighted_eps = None
+            if weighted_eps_list is not None:
+                try:
+                    # If weighted_eps_list already indexed by batch
+                    if len(weighted_eps_list) == len(train_loader):
+                        weighted_eps = weighted_eps_list[batch_idx]
+                    else:
+                        # treat weighted_eps_list as per-sample list/array
+                        # get global indices for this batch (handles Subset)
+                        if hasattr(train_loader.dataset, 'indices'):
+                            # Subset: indices attribute maps subset indices -> original dataset indices
+                            all_indices = train_loader.dataset.indices
+                        else:
+                            # full dataset: sequential indices
+                            all_indices = list(range(len(train_loader.dataset)))
+            
+                        # compute this batch's sample indices (may be non-contiguous if sampler used)
+                        start = batch_idx * train_loader.batch_size
+                        end = start + data.size(0)
+                        # guard for out-of-range
+                        batch_sample_indices = all_indices[start:end]
+            
+                        # gather per-sample weighted eps entries and stack if tensors
+                        batch_w = [weighted_eps_list[i] for i in batch_sample_indices]
+                        # convert list-of-arrays/tensors -> single tensor on device when possible
+                        if len(batch_w) > 0 and torch.is_tensor(batch_w[0]):
+                            weighted_eps = torch.stack([w.to(device) for w in batch_w])
+                        else:
+                            # fallback: make list (your attack function must accept this), or convert to tensor
+                            weighted_eps = [torch.as_tensor(w).to(device) if not torch.is_tensor(w) else w.to(device) for w in batch_w]
+                except Exception as e:
+                    # fallback: keep None if anything goes wrong (attack will use default)
+                    print("Warning: could not index weighted_eps_list for batch", batch_idx, ":", repr(e))
+                    weighted_eps = None
+            # ---- end robust weighted_eps selection ----
+
 
         # calculate robust perturbation
         # ---------------- TEMP DEBUG: use clean data ----------------
@@ -554,6 +590,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
