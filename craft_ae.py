@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torchattacks import PGD, AutoAttack
+from utils import denormalize, renormalize  # add this import
 
 def element_wise_clamp(eta, epsilon):
     # Element-wise clamp using the epsilon tensor
@@ -42,17 +43,14 @@ def craft_adversarial_example(model,
                     k=3,
                     num_classes=num_classes)
     else:
-        # x_natural is currently normalized (model input). Move it back to [0,1] pixel space:
-        x_natural_unnorm = denormalize(x_natural, device)  # device should be same as x_natural.device
+        # assume x_natural is normalized already and device is defined
+        # denormalize -> run attack in pixel-space -> clamp -> renormalize
         
-        # run the attack in pixel space
-        x_adv_unnorm = attack(x_natural_unnorm, y)
-        
-        # clamp to valid pixel range (defensive)
-        x_adv_unnorm = torch.clamp(x_adv_unnorm, 0.0, 1.0)
-        
-        # renormalize before forwarding to the model
-        x_adv = renormalize(x_adv_unnorm, device)
+        x_natural_unnorm = denormalize(x_natural, device)          # back to [0,1] pixels
+        x_adv_unnorm = attack(x_natural_unnorm, y)                 # run torchattacks / repo attack here
+        x_adv_unnorm = torch.clamp(x_adv_unnorm, 0.0, 1.0)         # defensive
+        x_adv = renormalize(x_adv_unnorm, device)                 # back to normalized model input
+
     return x_adv
 
 def part_pgd(model,
@@ -229,3 +227,4 @@ def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     loss = torch.sum(loss)
 
     return loss
+
