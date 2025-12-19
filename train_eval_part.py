@@ -20,6 +20,20 @@ from utils import *
 import tempfile
 import shutil
 
+# CIFAR normalization (same as dataset)
+CIFAR_MEAN = torch.tensor([0.4914, 0.4822, 0.4465], device='cpu').view(1,3,1,1)
+CIFAR_STD  = torch.tensor([0.2023, 0.1994, 0.2010], device='cpu').view(1,3,1,1)
+
+def denormalize(x, device):
+    mean = CIFAR_MEAN.to(device)
+    std  = CIFAR_STD.to(device)
+    return x * std + mean
+
+def renormalize(x, device):
+    mean = CIFAR_MEAN.to(device)
+    std  = CIFAR_STD.to(device)
+    return (x - mean) / std
+
 def safe_numpy_save(path, arr, allow_pickle=True):
     """Atomically save arr to path using a temp file and os.replace()."""
     d = os.path.dirname(path)
@@ -625,6 +639,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
