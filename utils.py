@@ -38,21 +38,25 @@ def adjust_learning_rate(args, optimizer, epoch):
 def craft_weight_matrix(model, data, device, args, parallel=True):
     batch, img_size1, img_size2 = data.shape[0], data.shape[-2], data.shape[-1]
     weight_matrix_tensor = torch.empty(batch, 3, img_size1, img_size2).to(device)
+    
+    base_model = getattr(model, 'module', model)
 
     if args.model == 'resnet':
-        if args.cam == 'gradcam':
-            cam_extractor = GradCAM(model.module if parallel else model, 'layer4')
-        if args.cam == 'xgradcam':
-            cam_extractor = XGradCAM(model.module if parallel else model, 'layer4')
-        if args.cam == 'layercam':
-            cam_extractor = LayerCAM(model.module if parallel else model, 'layer4')
+        target_layer = 'layer4'
     elif args.model == 'wideresnet':
-        if args.cam == 'gradcam':
-            cam_extractor = GradCAM(model.module if parallel else model, 'block3')
-        if args.cam == 'xgradcam':
-            cam_extractor = XGradCAM(model.module if parallel else model, 'block3')
-        if args.cam == 'layercam':
-            cam_extractor = LayerCAM(model.module if parallel else model, 'block3')
+        target_layer = 'block3'
+    else:
+        raise ValueError("Unknown model")
+    
+    if args.cam == 'gradcam':
+        cam_extractor = GradCAM(base_model, target_layer)
+    elif args.cam == 'xgradcam':
+        cam_extractor = XGradCAM(base_model, target_layer)
+    elif args.cam == 'layercam':
+        cam_extractor = LayerCAM(base_model, target_layer)
+    else:
+        raise ValueError("Unknown CAM method")
+
 
     for i in range(batch):
         output = model(data[i].unsqueeze(0))
@@ -208,3 +212,4 @@ def save_cam(model, train_loader, device, args):
         weighted_eps = generate_weighted_eps(weight_matrix, args)
         weighted_eps_list.append(weighted_eps)
     return weighted_eps_list
+
