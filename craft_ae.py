@@ -43,23 +43,30 @@ def craft_adversarial_example(model,
                     k=3,
                     num_classes=num_classes)
     else:
-        # --- replace the current attack call block with this ---
-        # ensure preprocess.denormalize / renormalize are imported at top:
-        # from preprocess import denormalize, renormalize
+        # --- robust attack block for craft_ae.py (paste in place of the old call) ---
+        # requires: from preprocess import denormalize, renormalize  (already done)
         
-        # x_natural is the normalized input tensor the model expects
-        dev = x_natural.device              # use the actual tensor device
+        # use tensor device directly
+        dev = x_natural.device
         
-        # 1) convert to pixel space [0,1]
+        # 1) denormalize -> pixel space
         x_natural_unnorm = denormalize(x_natural, dev)
         
-        # 2) run the attack in pixel space (torchattacks expects [0,1])
-        x_adv_unnorm = attack(x_natural_unnorm, y)
+        # 2) clamp to [0,1] to satisfy torchattacks' input checks (defensive)
+        x_natural_unnorm = torch.clamp(x_natural_unnorm, 0.0, 1.0)
         
-        # 3) clamp the adversarial pixels then renormalize for the model
+        # 3) ensure labels are proper device/dtype for the attack
+        y_attack = y.to(dev)
+        
+        # 4) run the attack (now guaranteed to be in [0,1])
+        #    make sure the attack object is on the same device (torchattacks usually accepts tensors on device)
+        x_adv_unnorm = attack(x_natural_unnorm, y_attack)
+        
+        # 5) defensive clamp the adversarial pixels and renormalize for model input
         x_adv_unnorm = torch.clamp(x_adv_unnorm, 0.0, 1.0)
         x_adv = renormalize(x_adv_unnorm, dev)
-        # --- end replacement ---
+        # --- end block ---
+
 
 
     return x_adv
@@ -238,6 +245,7 @@ def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     loss = torch.sum(loss)
 
     return loss
+
 
 
 
