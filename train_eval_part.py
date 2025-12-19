@@ -287,28 +287,19 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
             weighted_eps = weighted_eps_list[batch_idx] if weighted_eps_list is not None else None
 
         # calculate robust perturbation
-        model.eval()
-        if args.attack == 'pgd':
-            data_adv = part_pgd(model,
-                                data,
-                                label,
-                                weighted_eps,
-                                epsilon=args.epsilon,
-                                num_steps=args.num_steps,
-                                step_size=args.step_size)
-        elif args.attack == 'mma':
-            data_adv = part_mma(model,
-                                data,
-                                label,
-                                weighted_eps,
-                                epsilon=args.epsilon,
-                                step_size=args.step_size,
-                                num_steps=args.num_steps,
-                                rand_init=args.rand_init,
-                                k=3,
-                                num_classes=args.num_class)
-        else:
-            raise ValueError("Unknown attack")
+        # ---------------- TEMP DEBUG: use clean data ----------------
+        # model.eval()
+        # if args.attack == 'pgd':
+        #     data_adv = part_pgd(model, ...)
+        # elif args.attack == 'mma':
+        #     data_adv = part_mma(model, ...)
+        # else:
+        #     raise ValueError("Unknown attack")
+        
+        # Use clean images (no adversarial attack) for quick debug epoch
+        data_adv = data
+        # ----------------------------------------------------------
+
 
         model.train()
         optimizer.zero_grad()
@@ -546,6 +537,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
