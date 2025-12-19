@@ -38,27 +38,37 @@ def safe_numpy_save(path, arr, allow_pickle=True):
         raise
 
 def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args):
-    """Try to load weighted_eps; if missing/corrupt, recompute and save atomically."""
+    """Try to load weighted_eps; if missing/corrupt or ill-sized, recompute and save atomically.
+
+    Ensures the returned list/sequence has length == len(train_loader) (one entry per batch).
+    Converts stored numpy/tensor elements to torch tensors on `device`.
+    """
     def recompute_and_save():
         print("Recomputing weighted_eps_list via save_cam(...)")
         w = save_cam(model, train_loader, device, args)
-        # convert tensors to CPU numpy arrays for storage
+        # convert tensors to CPU numpy arrays for storage (object array)
         w_cpu = []
         for t in w:
             if torch.is_tensor(t):
                 w_cpu.append(t.detach().cpu().numpy())
             else:
-                # keep as is (if already numpy)
                 w_cpu.append(np.array(t, dtype=object))
         safe_numpy_save(weighted_eps_path, np.array(w_cpu, dtype=object))
-        # return as list of torch tensors on device
-        return [torch.from_numpy(arr).to(device) for arr in w_cpu]
+        # return as list of torch tensors on device (per-batch)
+        ret = []
+        for arr in w_cpu:
+            try:
+                ret.append(torch.from_numpy(np.asarray(arr)).to(device))
+            except Exception:
+                # fallback: keep as numpy array converted to tensor
+                ret.append(torch.as_tensor(np.array(arr, dtype=object)).to(device))
+        return ret
 
+    # If file missing or empty -> recompute
     if not os.path.exists(weighted_eps_path):
         print("weighted_eps file not found -> recomputing.")
         return recompute_and_save()
 
-    # quick size check
     if os.path.getsize(weighted_eps_path) == 0:
         print("weighted_eps file is empty -> recomputing.")
         try:
@@ -72,21 +82,37 @@ def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
         if arr is None or len(arr) == 0:
             print("Loaded arr empty -> recomputing.")
             return recompute_and_save()
+
+        # If the stored arr length doesn't match number of batches, recompute.
+        expected_batches = len(train_loader)
+        if len(arr) != expected_batches:
+            print(f"weighted_eps length mismatch (loaded {len(arr)} != expected {expected_batches}) -> recomputing.")
+            return recompute_and_save()
+
         # convert to torch tensors on device
         result = []
         for item in arr:
+            # item may be ndarray, list, or already tensor
             if isinstance(item, np.ndarray):
-                result.append(torch.from_numpy(item).to(device))
-            else:
-                # fallback attempt
                 try:
-                    tmp = np.array(item, dtype=object)
+                    result.append(torch.from_numpy(item).to(device))
+                except Exception:
+                    # fallback: convert object -> array then tensor
+                    result.append(torch.as_tensor(np.array(item, dtype=object)).to(device))
+            elif torch.is_tensor(item):
+                result.append(item.to(device))
+            else:
+                # try to coerce arbitrary object to numpy then tensor
+                try:
+                    tmp = np.array(item)
                     result.append(torch.from_numpy(tmp).to(device))
                 except Exception:
                     print("Element conversion failed -> recomputing.")
                     return recompute_and_save()
+
         print("Loaded weighted_eps_list from", weighted_eps_path)
         return result
+
     except (EOFError, ValueError, Exception) as e:
         print("Failed to load weighted_eps_list:", repr(e))
         return recompute_and_save()
@@ -597,6 +623,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
