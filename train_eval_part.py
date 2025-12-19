@@ -438,6 +438,23 @@ def main():
     else:
         print("Skipping warm-up (already completed in resumed checkpoint)")
 
+    # ===== DEBUG: train-subset accuracy check (after warm-up) =====
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for imgs, lbls in train_loader:
+            imgs, lbls = imgs.to(device), lbls.to(device)
+            preds = model(imgs).argmax(dim=1)
+            correct += (preds == lbls).sum().item()
+            total += lbls.size(0)
+            if total >= 500:  # limit to first 500 samples
+                break
+    print(f"DEBUG: train-subset accuracy (first {total}): {correct}/{total} = {100*correct/total:.2f}%")
+    model.train()
+    # =============================================================
+
+
     # compute or reload weighted_eps_list
     if weighted_eps_list is None:
         weighted_eps_list = save_cam(model, train_loader, device, args)
@@ -537,6 +554,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
