@@ -171,9 +171,9 @@ def save_checkpoint(path, model, optimizer, epoch):
             pass
     torch.save(payload, path)
 
-
 def try_resume(model, optimizer, model_dir, device):
     """If --resume and latest exists, load it and return start_epoch and weighted_eps_list if present"""
+    import numpy as _np  # local import to be safe if np isn't imported at top
     latest_path = os.path.join(model_dir, 'latest.pth')
     start_epoch = 1
     weighted_eps_list = None
@@ -184,20 +184,83 @@ def try_resume(model, optimizer, model_dir, device):
         # load model & optimizer
         model.load_state_dict(ckpt['model_state'])
         optimizer.load_state_dict(ckpt['optimizer_state'])
-        # restore RNGs if present
+
+        # ---------- restore RNGs if present (robust) ----------
+        def _to_byte_tensor(x):
+            """Convert x (bytes, bytearray, list, ndarray, or torch tensor) -> CPU torch.uint8 tensor."""
+            if isinstance(x, torch.Tensor):
+                t = x.to(dtype=torch.uint8).cpu()
+                return t
+            if isinstance(x, (bytes, bytearray)):
+                # bytes -> list of ints -> tensor
+                return torch.as_tensor(list(x), dtype=torch.uint8).cpu()
+            if isinstance(x, _np.ndarray):
+                arr = x.astype(_np.uint8, copy=False)
+                return torch.from_numpy(arr).to(dtype=torch.uint8).cpu()
+            if isinstance(x, (list, tuple)):
+                # list of ints or nested structure: try flat conversion
+                try:
+                    return torch.as_tensor(x, dtype=torch.uint8).cpu()
+                except Exception:
+                    # last resort: convert via numpy
+                    return torch.from_numpy(_np.array(x, dtype=_np.uint8)).cpu()
+            # unknown type
+            raise TypeError(f"Unsupported RNG state type: {type(x)}")
+
+        # safe restore for CPU rng_state
         if 'rng_state' in ckpt:
-            torch.set_rng_state(ckpt['rng_state'])
+            try:
+                rng_state = ckpt['rng_state']
+                # convert to byte tensor if needed
+                if not isinstance(rng_state, torch.Tensor):
+                    rng_state = _to_byte_tensor(rng_state)
+                else:
+                    rng_state = rng_state.to(dtype=torch.uint8).cpu()
+                torch.set_rng_state(rng_state)
+            except Exception as e:
+                print(f"Warning: could not restore CPU RNG state ({e}), continuing without it.")
+
+        # safe restore for CUDA RNGs (if available)
         if 'cuda_rng_state' in ckpt and torch.cuda.is_available():
             try:
-                torch.cuda.set_rng_state_all(ckpt['cuda_rng_state'])
-            except Exception:
-                pass
+                cuda_state = ckpt['cuda_rng_state']
+                # if it's a list/tuple of states for each device, convert each element
+                if isinstance(cuda_state, (list, tuple)):
+                    converted = []
+                    for s in cuda_state:
+                        if not isinstance(s, torch.Tensor):
+                            converted.append(_to_byte_tensor(s))
+                        else:
+                            converted.append(s.to(dtype=torch.uint8).cpu())
+                    torch.cuda.set_rng_state_all(converted)
+                else:
+                    # single-state case: convert and set for all devices
+                    s = cuda_state
+                    if not isinstance(s, torch.Tensor):
+                        s = _to_byte_tensor(s)
+                    else:
+                        s = s.to(dtype=torch.uint8).cpu()
+                    # attempt to broadcast same state to all devices
+                    try:
+                        torch.cuda.set_rng_state_all([s])
+                    except Exception:
+                        # fallback: try set for current device only
+                        try:
+                            torch.cuda.set_rng_state(s)
+                        except Exception as e:
+                            raise e
+            except Exception as e:
+                print(f"Warning: could not restore CUDA RNG state ({e}), continuing without it.")
+
+        # ------------------------------------------------------
+
         start_epoch = ckpt.get('epoch', 1) + 1
+
         # try to load weighted_eps_list if exists
         wpath = os.path.join(model_dir, 'weighted_eps_latest.npy')
         if os.path.exists(wpath):
             try:
-                weighted_eps_list = np.load(wpath, allow_pickle=True)
+                weighted_eps_list = _np.load(wpath, allow_pickle=True)
                 print("Loaded weighted_eps_list from", wpath)
             except Exception as e:
                 print("Could not load weighted_eps_list:", e)
@@ -438,6 +501,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
