@@ -43,13 +43,24 @@ def craft_adversarial_example(model,
                     k=3,
                     num_classes=num_classes)
     else:
-        # assume x_natural is normalized already and device is defined
-        # denormalize -> run attack in pixel-space -> clamp -> renormalize
+        # --- replace the current attack call block with this ---
+        # ensure preprocess.denormalize / renormalize are imported at top:
+        # from preprocess import denormalize, renormalize
         
-        x_natural_unnorm = denormalize(x_natural, device)          # back to [0,1] pixels
-        x_adv_unnorm = attack(x_natural_unnorm, y)                 # run torchattacks / repo attack here
-        x_adv_unnorm = torch.clamp(x_adv_unnorm, 0.0, 1.0)         # defensive
-        x_adv = renormalize(x_adv_unnorm, device)                 # back to normalized model input
+        # x_natural is the normalized input tensor the model expects
+        dev = x_natural.device              # use the actual tensor device
+        
+        # 1) convert to pixel space [0,1]
+        x_natural_unnorm = denormalize(x_natural, dev)
+        
+        # 2) run the attack in pixel space (torchattacks expects [0,1])
+        x_adv_unnorm = attack(x_natural_unnorm, y)
+        
+        # 3) clamp the adversarial pixels then renormalize for the model
+        x_adv_unnorm = torch.clamp(x_adv_unnorm, 0.0, 1.0)
+        x_adv = renormalize(x_adv_unnorm, dev)
+        # --- end replacement ---
+
 
     return x_adv
 
@@ -227,5 +238,6 @@ def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     loss = torch.sum(loss)
 
     return loss
+
 
 
