@@ -20,6 +20,8 @@ from dataset.svhn import SVHN
 
 from utils import *
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # CIFAR normalization (same as dataset)
 CIFAR_MEAN = torch.tensor([0.4914, 0.4822, 0.4465], device='cpu').view(1,3,1,1)
 CIFAR_STD  = torch.tensor([0.2023, 0.1994, 0.2010], device='cpu').view(1,3,1,1)
@@ -588,3 +590,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
