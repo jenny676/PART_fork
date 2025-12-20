@@ -312,8 +312,6 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         weighted_eps_list = np.load(weighted_eps_list, allow_pickle=True)
 
     model.train()
-    # DEBUG: confirm model is in train mode
-    print(f"DEBUG: train() called for epoch {epoch}; model.training = {model.training}")
     for batch_idx, (data, label) in enumerate(train_loader):
         # ensure tensors on right device and correct dtype for labels
         data = data.to(device, non_blocking=True)
@@ -370,18 +368,28 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
 
 
         # calculate robust perturbation
-        # ---------------- TEMP DEBUG: use clean data ----------------
-        # model.eval()
-        # if args.attack == 'pgd':
-        #     data_adv = part_pgd(model, ...)
-        # elif args.attack == 'mma':
-        #     data_adv = part_mma(model, ...)
-        # else:
-        #     raise ValueError("Unknown attack")
-        
-        # Use clean images (no adversarial attack) for quick debug epoch
-        data_adv = data
-        # ----------------------------------------------------------
+        model.eval()
+        if args.attack == 'pgd':
+            data = part_pgd(model,
+                                 X,
+                                 y,
+                                 weighted_eps,
+                                 epsilon=args.epsilon,
+                                 num_steps=args.num_steps,
+                                 step_size=args.step_size)
+        elif args.attack == 'mma':
+            data = part_mma(model,
+                            data,
+                            label,
+                            weighted_eps,
+                            epsilon=args.epsilon,
+                            step_size=args.step_size,
+                            num_steps=args.num_steps,
+                            rand_init=args.rand_init,
+                            k=3,
+                            num_classes=args.num_class)
+        else:
+            raise ValueError("Unknown attack")
 
 
         model.train()
@@ -390,12 +398,6 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         loss = F.cross_entropy(out, label)
         loss.backward()
         optimizer.step()
-        # DEBUG: light optimizer stepping check
-        try:
-            n_states = sum(1 for k in optimizer.state.keys())
-            print(f"DEBUG: after optimizer.step() - optimizer.state entries: {n_states}")
-        except Exception as e:
-            print("DEBUG: optimizer inspection failed:", repr(e))
 
 
         # print progress
@@ -639,6 +641,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
