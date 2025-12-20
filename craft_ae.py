@@ -6,6 +6,8 @@ import numpy as np
 from torchattacks import PGD, AutoAttack
 from preprocess import denormalize, renormalize  # add this import
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def element_wise_clamp(eta, epsilon):
     # Element-wise clamp using the epsilon tensor
     eta_clamped = torch.where(eta > epsilon, epsilon, eta)
@@ -245,6 +247,7 @@ def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     loss = torch.sum(loss)
 
     return loss
+
 
 
 
