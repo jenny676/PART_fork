@@ -80,7 +80,7 @@ def part_pgd(model,
              step_size=2/255):
     X_pgd = Variable(X.data, requires_grad=True)
 
-    random_noise = torch.FloatTensor(*X_pgd.shape).uniform_(-epsilon, epsilon).cuda()
+    random_noise = torch.FloatTensor(*X_pgd.shape).uniform_(-epsilon, epsilon).to(device)
     X_pgd = Variable(X_pgd.data + random_noise, requires_grad=True)
 
     for _ in range(num_steps):
@@ -109,12 +109,12 @@ def part_mma(model,
              num_classes):
     model.eval()
     x_adv = data.detach() + torch.from_numpy(
-        np.random.uniform(-epsilon, epsilon, data.shape)).float().cuda() if rand_init else data.detach()
+        np.random.uniform(-epsilon, epsilon, data.shape)).float().to(device) if rand_init else data.detach()
     x_adv = torch.clamp(x_adv, 0.0, 1.0)
 
     logits = model(data)
     target_onehot = torch.zeros(target.size() + (len(logits[0]),))
-    target_onehot = target_onehot.cuda()
+    target_onehot = target_onehot.to(device)
     target_onehot.scatter_(1, target.unsqueeze(1), 1.)
     target_var = Variable(target_onehot, requires_grad=False)
     index = torch.argsort(logits - 10000 * target_var)[:, num_classes - k:]
@@ -146,7 +146,7 @@ def part_mma(model,
 
     index_choose = torch.argsort(loss_pipy)[:, -1]
 
-    adv_final = torch.zeros(x_adv.size()).cuda()
+    adv_final = torch.zeros(x_adv.size()).to(device)
     for i in range(len(index_choose)):
         adv_final[i, :, :, :] = x_adv_set[index_choose[i]][i]
 
@@ -164,15 +164,15 @@ def mma(model,
         num_classes):
     model.eval()
     if category == "trades":
-        x_adv = data.detach() + 0.001 * torch.randn(data.shape).cuda().detach() if rand_init else data.detach()
+        x_adv = data.detach() + 0.001 * torch.randn(data.shape).to(device).detach() if rand_init else data.detach()
     if category == "Madry":
         x_adv = data.detach() + torch.from_numpy(
-            np.random.uniform(-epsilon, epsilon, data.shape)).float().cuda() if rand_init else data.detach()
+            np.random.uniform(-epsilon, epsilon, data.shape)).float().to(device) if rand_init else data.detach()
         x_adv = torch.clamp(x_adv, 0.0, 1.0)
 
     logits = model(data)
     target_onehot = torch.zeros(target.size() + (len(logits[0]),))
-    target_onehot = target_onehot.cuda()
+    target_onehot = target_onehot.to(device)
     target_onehot.scatter_(1, target.unsqueeze(1), 1.)
     target_var = Variable(target_onehot, requires_grad=False)
     index = torch.argsort(logits - 10000 * target_var)[:, num_classes - k:]
@@ -203,7 +203,7 @@ def mma(model,
 
     index_choose = torch.argsort(loss_pipy)[:, -1]
 
-    adv_final = torch.zeros(x_adv.size()).cuda()
+    adv_final = torch.zeros(x_adv.size()).to(device)
     for i in range(len(index_choose)):
         adv_final[i, :, :, :] = x_adv_set[index_choose[i]][i]
 
@@ -213,13 +213,13 @@ def mma(model,
 def mm_loss_train(output, target, target_choose, num_classes=10):
     target = target.data
     target_onehot = torch.zeros(target.size() + (num_classes,))
-    target_onehot = target_onehot.cuda()
+    target_onehot = target_onehot.to(device)
     target_onehot.scatter_(1, target.unsqueeze(1), 1.)
     target_var = Variable(target_onehot, requires_grad=False)
     real = (target_var * output).sum(1)
 
     target_onehot = torch.zeros(target_choose.size() + (num_classes,))
-    target_onehot = target_onehot.cuda()
+    target_onehot = target_onehot.to(device)
     target_onehot.scatter_(1, target_choose.unsqueeze(1), 1.)
     target_var = Variable(target_onehot, requires_grad=False)
 
@@ -230,13 +230,13 @@ def mm_loss_train(output, target, target_choose, num_classes=10):
 def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     target = target.data
     target_onehot = torch.zeros(target.size() + (num_classes,))
-    target_onehot = target_onehot.cuda()
+    target_onehot = target_onehot.to(device)
     target_onehot.scatter_(1, target.unsqueeze(1), 1.)
     target_var = Variable(target_onehot, requires_grad=False)
     real = (target_var * output).sum(1)
 
     target_onehot = torch.zeros(target_choose.size() + (num_classes,))
-    target_onehot = target_onehot.cuda()
+    target_onehot = target_onehot.to(device)
     target_onehot.scatter_(1, target_choose.unsqueeze(1), 1.)
     target_var = Variable(target_onehot, requires_grad=False)
 
@@ -245,6 +245,7 @@ def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     loss = torch.sum(loss)
 
     return loss
+
 
 
 
