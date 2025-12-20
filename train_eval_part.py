@@ -2,6 +2,9 @@ from __future__ import print_function
 import os
 import argparse
 import time
+import logging
+import tempfile
+import shutil
 
 import numpy as np
 import torch
@@ -16,9 +19,6 @@ from dataset.cifar10 import CIFAR10
 from dataset.svhn import SVHN
 
 from utils import *
-
-import tempfile
-import shutil
 
 # CIFAR normalization (same as dataset)
 CIFAR_MEAN = torch.tensor([0.4914, 0.4822, 0.4465], device='cpu').view(1,3,1,1)
@@ -58,7 +58,7 @@ def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
     Converts stored numpy/tensor elements to torch tensors on `device`.
     """
     def recompute_and_save():
-        print("Recomputing weighted_eps_list via save_cam(...)")
+        logging.info("Recomputing weighted_eps_list via save_cam(...)")
         w = save_cam(model, train_loader, device, args)
         # convert tensors to CPU numpy arrays for storage (object array)
         w_cpu = []
@@ -80,11 +80,11 @@ def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
 
     # If file missing or empty -> recompute
     if not os.path.exists(weighted_eps_path):
-        print("weighted_eps file not found -> recomputing.")
+        logging.info("weighted_eps file not found -> recomputing.")
         return recompute_and_save()
 
     if os.path.getsize(weighted_eps_path) == 0:
-        print("weighted_eps file is empty -> recomputing.")
+        logging.info("weighted_eps file is empty -> recomputing.")
         try:
             os.remove(weighted_eps_path)
         except Exception:
@@ -94,13 +94,14 @@ def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
     try:
         arr = np.load(weighted_eps_path, allow_pickle=True)
         if arr is None or len(arr) == 0:
-            print("Loaded arr empty -> recomputing.")
+            logging.info("Loaded arr empty -> recomputing.")
             return recompute_and_save()
 
         # If the stored arr length doesn't match number of batches, recompute.
         expected_batches = len(train_loader)
         if len(arr) != expected_batches:
-            print(f"weighted_eps length mismatch (loaded {len(arr)} != expected {expected_batches}) -> recomputing.")
+            logging.info("weighted_eps length mismatch (loaded %d != expected %d) -> recomputing.",
+                         len(arr), expected_batches)
             return recompute_and_save()
 
         # convert to torch tensors on device
@@ -121,14 +122,14 @@ def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
                     tmp = np.array(item)
                     result.append(torch.from_numpy(tmp).to(device))
                 except Exception:
-                    print("Element conversion failed -> recomputing.")
+                    logging.warning("Element conversion failed -> recomputing.")
                     return recompute_and_save()
 
-        print("Loaded weighted_eps_list from", weighted_eps_path)
+        logging.info("Loaded weighted_eps_list from %s", weighted_eps_path)
         return result
 
     except (EOFError, ValueError, Exception) as e:
-        print("Failed to load weighted_eps_list:", repr(e))
+        logging.warning("Failed to load weighted_eps_list: %s", repr(e))
         return recompute_and_save()
 
 
@@ -194,7 +195,17 @@ parser.add_argument('--attack', type=str, default='pgd', choices=['pgd', 'mma'])
 parser.add_argument('--resume', action='store_true', default=False,
                     help='resume from latest checkpoint if available')
 
+# debug flag to control verbosity
+parser.add_argument('--debug', action='store_true', default=False,
+                    help='enable debug logging')
+
 args = parser.parse_args()
+
+# configure logging
+if args.debug:
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s')
+else:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
 
 def save_checkpoint(path, model, optimizer, epoch):
@@ -219,7 +230,7 @@ def try_resume(model, optimizer, model_dir, device):
     weighted_eps_list = None
 
     if args.resume and os.path.exists(latest_path):
-        print("Resuming from checkpoint:", latest_path)
+        logging.info("Resuming from checkpoint: %s", latest_path)
         ckpt = torch.load(latest_path, map_location=device)
         # load model & optimizer
         model.load_state_dict(ckpt['model_state'])
@@ -258,7 +269,7 @@ def try_resume(model, optimizer, model_dir, device):
                     rng_state = rng_state.to(dtype=torch.uint8).cpu()
                 torch.set_rng_state(rng_state)
             except Exception as e:
-                print(f"Warning: could not restore CPU RNG state ({e}), continuing without it.")
+                logging.warning("Warning: could not restore CPU RNG state (%s), continuing without it.", e)
 
         # safe restore for CUDA RNGs (if available)
         if 'cuda_rng_state' in ckpt and torch.cuda.is_available():
@@ -290,7 +301,7 @@ def try_resume(model, optimizer, model_dir, device):
                         except Exception as e:
                             raise e
             except Exception as e:
-                print(f"Warning: could not restore CUDA RNG state ({e}), continuing without it.")
+                logging.warning("Warning: could not restore CUDA RNG state (%s), continuing without it.", e)
 
         # ------------------------------------------------------
 
@@ -301,16 +312,13 @@ def try_resume(model, optimizer, model_dir, device):
         if os.path.exists(wpath):
             try:
                 weighted_eps_list = _np.load(wpath, allow_pickle=True)
-                print("Loaded weighted_eps_list from", wpath)
+                logging.info("Loaded weighted_eps_list from %s", wpath)
             except Exception as e:
-                print("Could not load weighted_eps_list:", e)
+                logging.warning("Could not load weighted_eps_list: %s", e)
     return start_epoch, weighted_eps_list
 
 
 def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list):
-    if args.pre_trained and isinstance(weighted_eps_list, str):
-        weighted_eps_list = np.load(weighted_eps_list, allow_pickle=True)
-
     model.train()
     for batch_idx, (data, label) in enumerate(train_loader):
         # ensure tensors on right device and correct dtype for labels
@@ -318,22 +326,17 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         label = label.to(device, non_blocking=True).long()
 
         if args.pre_trained:
-            # weighted_eps_list expected to be an array-like indexed by batch_idx OR precomputed per-sample
-            weighted_eps = torch.from_numpy(weighted_eps_list[f'arr_{batch_idx}']).to(device)
+            try:
+                # weighted_eps_list expected to be an array-like indexed by batch_idx OR precomputed per-sample
+                weighted_eps = torch.from_numpy(weighted_eps_list[f'arr_{batch_idx}']).to(device)
+            except Exception:
+                logging.debug("pre_trained weighted_eps lookup failed for batch %d", batch_idx)
+                weighted_eps = None
         else:
             # if weighted_eps_list is a python list/np.array of same length as loader
-            # ---- start robust weighted_eps selection ----
             weighted_eps = None
             if weighted_eps_list is not None:
                 try:
-                    # Debug: show lengths once (helps confirm format)
-                    if batch_idx == 0:
-                        try:
-                            print("DEBUG: weighted_eps_list length:", len(weighted_eps_list),
-                                  "num_batches:", len(train_loader), "dataset_size:", len(train_loader.dataset))
-                        except Exception:
-                            pass
-            
                     # Case A: weighted_eps_list is provided per-batch
                     if len(weighted_eps_list) == len(train_loader):
                         weighted_eps = weighted_eps_list[batch_idx]
@@ -346,14 +349,14 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
                         else:
                             # Full dataset (no Subset): assume contiguous ordering
                             all_indices = list(range(len(train_loader.dataset)))
-            
+
                         start = batch_idx * train_loader.batch_size
                         end = start + data.size(0)  # data.size(0) handles last smaller batch
                         batch_sample_indices = all_indices[start:end]
-            
+
                         # collect per-sample weighted eps for this batch
                         batch_w = [weighted_eps_list[i] for i in batch_sample_indices]
-            
+
                         # convert to a batched tensor if elements are tensors, else list of tensors
                         if len(batch_w) > 0 and torch.is_tensor(batch_w[0]):
                             weighted_eps = torch.stack([w.to(device) for w in batch_w])
@@ -361,36 +364,32 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
                             weighted_eps = [torch.as_tensor(w).to(device) if not torch.is_tensor(w) else w.to(device)
                                             for w in batch_w]
                 except Exception as e:
-                    print("Warning: could not index weighted_eps_list for batch", batch_idx, ":", repr(e))
+                    logging.warning("Could not index weighted_eps_list for batch %d: %s", batch_idx, repr(e))
                     weighted_eps = None
-            # ---- end robust selection ----
 
-
-
-        # calculate robust perturbation
+        # calculate robust perturbation: ensure attack returns data_adv
         model.eval()
         if args.attack == 'pgd':
-            data = part_pgd(model,
-                                 X,
-                                 y,
-                                 weighted_eps,
-                                 epsilon=args.epsilon,
-                                 num_steps=args.num_steps,
-                                 step_size=args.step_size)
+            data_adv = part_pgd(model,
+                                data,
+                                label,
+                                weighted_eps,
+                                epsilon=args.epsilon,
+                                num_steps=args.num_steps,
+                                step_size=args.step_size)
         elif args.attack == 'mma':
-            data = part_mma(model,
-                            data,
-                            label,
-                            weighted_eps,
-                            epsilon=args.epsilon,
-                            step_size=args.step_size,
-                            num_steps=args.num_steps,
-                            rand_init=args.rand_init,
-                            k=3,
-                            num_classes=args.num_class)
+            data_adv = part_mma(model,
+                                data,
+                                label,
+                                weighted_eps,
+                                epsilon=args.epsilon,
+                                step_size=args.step_size,
+                                num_steps=args.num_steps,
+                                rand_init=args.rand_init,
+                                k=3,
+                                num_classes=args.num_class)
         else:
             raise ValueError("Unknown attack")
-
 
         model.train()
         optimizer.zero_grad()
@@ -399,13 +398,12 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         loss.backward()
         optimizer.step()
 
-
-        # print progress
+        # print progress (info-level)
         if batch_idx % args.log_interval == 0:
             processed = (batch_idx + 1) * data.size(0)
             total = len(train_loader.dataset)
-            print('Train Epoch: {} [{}/{} ({:.2f}%)]\tLoss: {:.6f}'.format(
-                epoch, processed, total, 100. * (batch_idx + 1) / len(train_loader), loss.item()))
+            logging.info('Train Epoch: %d [%d/%d (%.2f%%)]\tLoss: %.6f',
+                         epoch, processed, total, 100. * (batch_idx + 1) / len(train_loader), loss.item())
 
 
 def main():
@@ -468,7 +466,8 @@ def main():
             pin_memory=getattr(train_loader, 'pin_memory', True),
             drop_last=getattr(train_loader, 'drop_last', False)
         )
-        print(f"Using {num_use}/{num_train} training samples ({args.train_percent}%) for training")
+        logging.info("Using %d/%d training samples (%.2f%%) for training",
+                     num_use, num_train, args.train_percent)
 
     # create model, optimizer, wrap DataParallel
     model = model.to(device)
@@ -489,24 +488,7 @@ def main():
 
     # try resume
     start_epoch, _ = try_resume(model, optimizer, model_dir, device)
-    # ----------------- DEBUG: resume sanity checks -----------------
-    # Print start epoch and basic checkpoint/optimizer info
-    print("DEBUG: start_epoch =", start_epoch)
-    # Inspect optimizer state (quick, safe)
-    try:
-        ckpt_path = os.path.join(model_dir, 'latest.pth')
-        if os.path.exists(ckpt_path):
-            ck = torch.load(ckpt_path, map_location='cpu')
-            print("DEBUG: ckpt epoch:", ck.get('epoch'))
-            print("DEBUG: ckpt keys:", list(ck.keys()))
-            # quick optimizer state size check
-            st = ck.get('optimizer_state', {}).get('state', {})
-            print("DEBUG: optimizer_state entries (sample):", list(st.keys())[:5], "len=", len(st))
-        else:
-            print("DEBUG: no latest.pth found at", ckpt_path)
-    except Exception as e:
-        print("DEBUG: failed resume-inspect:", repr(e))
-    # ---------------------------------------------------------------
+    logging.info("start_epoch = %d", start_epoch)
 
     weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
     weighted_eps_list = safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
@@ -514,42 +496,25 @@ def main():
     # warm up phase
     warmup_start = start_epoch if start_epoch <= args.warm_up else args.warm_up + 1
     if warmup_start <= args.warm_up:
-        print('warm up starts')
+        logging.info('Warm up starts')
         for epoch in range(warmup_start, args.warm_up + 1):
             standard_train(args, model, device, train_loader, optimizer, epoch)
             # always save latest
             save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch)
             torch.save(model.state_dict(), os.path.join(model_dir, f'pre_part_epoch{epoch}.pth'))
-            print('saved warm-up model epoch', epoch)
-        print('warm up ends')
+            logging.info('Saved warm-up model epoch %d', epoch)
+        logging.info('Warm up ends')
     else:
-        print("Skipping warm-up (already completed in resumed checkpoint)")
-
-    # ===== DEBUG: train-subset accuracy check (after warm-up) =====
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for imgs, lbls in train_loader:
-            imgs, lbls = imgs.to(device), lbls.to(device)
-            preds = model(imgs).argmax(dim=1)
-            correct += (preds == lbls).sum().item()
-            total += lbls.size(0)
-            if total >= 500:  # limit to first 500 samples
-                break
-    print(f"DEBUG: train-subset accuracy (first {total}): {correct}/{total} = {100*correct/total:.2f}%")
-    model.train()
-    # =============================================================
-
+        logging.info("Skipping warm-up (already completed in resumed checkpoint)")
 
     # compute or reload weighted_eps_list
     if weighted_eps_list is None:
         weighted_eps_list = save_cam(model, train_loader, device, args)
         # save latest weighted eps list
         def to_cpu_numpy(x):
-          if torch.is_tensor(x):
-            return x.detach().cpu().numpy()
-          return x
+            if torch.is_tensor(x):
+                return x.detach().cpu().numpy()
+            return x
 
         weighted_eps_list_cpu = [to_cpu_numpy(w) for w in weighted_eps_list]
 
@@ -560,7 +525,7 @@ def main():
         )
 
     else:
-        print("Using weighted_eps_list loaded from checkpoint")
+        logging.info("Using weighted_eps_list loaded from checkpoint")
 
     # main training phase
     total_main_epochs = args.epochs - args.warm_up
@@ -589,7 +554,7 @@ def main():
                             np.array(w_cpu, dtype=object))
             safe_numpy_save(os.path.join(model_dir, 'weighted_eps_latest.npy'),
                             np.array(w_cpu, dtype=object))
-            print(f"Saved weighted_eps for epoch {main_epoch}")
+            logging.info("Saved weighted_eps for epoch %d", main_epoch)
     
         # adjust learning rate for this epoch
         adjust_learning_rate(args, optimizer, main_epoch)
@@ -602,9 +567,9 @@ def main():
         save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
         torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
         if epoch_global % args.save_freq == 0:
-            print('saved model at global epoch', epoch_global)
+            logging.info('Saved model at global epoch %d', epoch_global)
     
-        print('================================================================')
+        logging.info('================================================================')
 
 
     # evaluation on adversarial examples
@@ -613,55 +578,13 @@ def main():
     if 'all' in modes:
         modes = ['pgd','mma','aa']
 
-    # ----------------- DEBUG: quick one-batch sanity check on test loader -----------------
-    print("DEBUG: running one-batch sanity check on test_loader")
-    model.eval()
-    try:
-        imgs, labels = next(iter(test_loader))
-        imgs, labels = imgs.to(device), labels.to(device)
-        with torch.no_grad():
-            preds = model(imgs).argmax(dim=1)
-        print("DEBUG: labels[:20]:", labels[:20].cpu().numpy())
-        print("DEBUG: preds [:20]:", preds[:20].cpu().numpy())
-        # quick counts
-        unique_preds = torch.unique(preds).cpu().numpy().tolist()
-        print("DEBUG: unique preds in batch (sample):", unique_preds)
-    except Exception as e:
-        print("DEBUG: one-batch sanity check failed:", repr(e))
-    # --------------------------------------------------------------------------------------
-
     for mode in modes:
         if mode not in ('pgd','mma','aa'):
-            print("Unknown eval mode:", mode)
+            logging.warning("Unknown eval mode: %s", mode)
             continue
-        print(f'{mode.upper()}=============================================================')
+        logging.info('%s evaluation starting', mode.upper())
         eval_test(args, model, device, test_loader, mode=mode)
-
 
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
