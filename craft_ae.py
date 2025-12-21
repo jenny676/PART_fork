@@ -8,10 +8,23 @@ from preprocess import denormalize, renormalize  # add this import
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def element_wise_clamp(eta, epsilon):
-    # Element-wise clamp using the epsilon tensor
-    eta_clamped = torch.where(eta > epsilon, epsilon, eta)
-    eta_clamped = torch.where(eta < -epsilon, -epsilon, eta_clamped)
+def element_wise_clamp(eta: torch.Tensor, epsilon):
+    """
+    Clamp `eta` element-wise to [-epsilon, +epsilon].
+    epsilon: scalar (float/int) or tensor broadcastable to eta.shape.
+    Raises ValueError if epsilon is None.
+    """
+    if epsilon is None:
+        raise ValueError("element_wise_clamp: `epsilon` is None. Provide scalar or tensor epsilon.")
+
+    if not isinstance(epsilon, torch.Tensor):
+        eps = torch.as_tensor(epsilon, dtype=eta.dtype, device=eta.device)
+    else:
+        eps = epsilon.to(device=eta.device, dtype=eta.dtype)
+
+    # clamp with broadcasting
+    eta_clamped = torch.where(eta > eps, eps, eta)
+    eta_clamped = torch.where(eta_clamped < -eps, -eps, eta_clamped)
     return eta_clamped
 
 def craft_adversarial_example(model, 
@@ -79,24 +92,55 @@ def part_pgd(model,
              weighted_eps,
              epsilon=8/255,
              num_steps=10,
-             step_size=2/255):
-    X_pgd = Variable(X.data, requires_grad=True)
+             step_size=2/255,
+             device=None):
+    """
+    Projected Gradient Descent on input X.
+    - weighted_eps: per-element/per-pixel epsilon tensor or None (fall back to scalar epsilon).
+    - Uses modern tensor API (no Variable).
+    """
+    if device is None:
+        device = X.device
 
-    random_noise = torch.FloatTensor(*X_pgd.shape).uniform_(-epsilon, epsilon).to(device)
-    X_pgd = Variable(X_pgd.data + random_noise, requires_grad=True)
+    # start from a detached copy on correct device
+    X_orig = X.detach().to(device)
+    X_pgd = X_orig.clone().detach()
+    X_pgd.requires_grad_(True)
+
+    # random start within scalar epsilon (note: uses scalar epsilon, not weighted_eps)
+    random_noise = torch.empty_like(X_pgd).uniform_(-epsilon, epsilon)
+    X_pgd = (X_pgd + random_noise).detach()
+    X_pgd.requires_grad_(True)
+
+    loss_fn = nn.CrossEntropyLoss()
 
     for _ in range(num_steps):
-        opt = torch.optim.SGD([X_pgd], lr=1e-3)
-        opt.zero_grad()
-
-        with torch.enable_grad():
-            loss = nn.CrossEntropyLoss()(model(X_pgd), y)
+        # forward + backward for gradient on X_pgd
+        outputs = model(X_pgd)
+        loss = loss_fn(outputs, y.to(device))
+        # zero existing grads on tensor if present
+        if X_pgd.grad is not None:
+            X_pgd.grad.detach_()
+            X_pgd.grad.zero_()
         loss.backward()
-        eta = step_size * X_pgd.grad.data.sign()
-        X_pgd = Variable(X_pgd.data + eta, requires_grad=True)
-        eta = element_wise_clamp(X_pgd.data - X.data, weighted_eps)
-        X_pgd = Variable(X.data + eta, requires_grad=True)
-        X_pgd = Variable(torch.clamp(X_pgd, 0, 1.0), requires_grad=True)
+
+        # gradient step on inputs
+        eta_step = step_size * X_pgd.grad.sign()
+        X_pgd = (X_pgd + eta_step).detach()
+        X_pgd.requires_grad_(True)
+
+        # choose epsilon to clamp with
+        eps_to_use = weighted_eps if weighted_eps is not None else epsilon
+        # ensure X_orig is on same device
+        X_orig = X_orig.to(X_pgd.device)
+
+        # element-wise clamp the perturbation
+        delta = X_pgd - X_orig
+        delta = element_wise_clamp(delta, eps_to_use)
+        X_pgd = (X_orig + delta).detach()
+        X_pgd = torch.clamp(X_pgd, 0.0, 1.0)
+        X_pgd.requires_grad_(True)
+
     return X_pgd
 
 def part_mma(model, 
@@ -247,6 +291,7 @@ def mm_loss(output, target, target_choose, confidence=50, num_classes=10):
     loss = torch.sum(loss)
 
     return loss
+
 
 
 
