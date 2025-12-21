@@ -613,91 +613,118 @@ def main():
         # optionally recompute weighted_eps_list periodically
         if main_epoch % args.save_weights == 0 and main_epoch != 1:
             weighted_eps_list = save_cam(model, train_loader, device, args)
-            # save logic...
+            # convert & save cpu numpy as you already do...
+            w_cpu = []
+            for w in weighted_eps_list:
+                if torch.is_tensor(w):
+                    w_cpu.append(w.detach().cpu().numpy())
+                else:
+                    w_cpu.append(np.array(w, dtype=object))
+            safe_numpy_save(os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'),
+                            np.array(w_cpu, dtype=object))
+            safe_numpy_save(os.path.join(model_dir, 'weighted_eps_latest.npy'),
+                            np.array(w_cpu, dtype=object))
             logging.info("Saved weighted_eps for epoch %d", main_epoch)
-
-    # adjust learning rate for this epoch
-    adjust_learning_rate(args, optimizer, main_epoch)
-
-    # adversarial training for this epoch (returns per-epoch train metrics)
-    t0 = time.time()
-    train_stats = train(args, model, device, train_loader, optimizer, main_epoch, weighted_eps_list)
-    train_time = time.time()
-    # compute global epoch index that matches your saved filename convention
-    epoch_global = args.warm_up + main_epoch
-
-    # evaluate on test set (both clean & robust)
-    test_stats = evaluate_epoch(args, model, device, test_loader, attack=args.attack)
-    test_time = time.time()
-
-    # Save checkpoints (latest + per epoch)
-    save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
-    torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
-    if epoch_global % args.save_freq == 0:
-        logging.info('Saved model at global epoch %d', epoch_global)
-
-    # compute lr for logging
-    lr = optimizer.param_groups[0]['lr']
-
-    # AWP-style logging line (same fields & format)
-    logging.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-                 epoch_global,
-                 train_time - t0,
-                 test_time - train_time,
-                 lr,
-                 train_stats['train_loss'] / train_stats['train_n'],
-                 train_stats['train_acc'] / train_stats['train_n'],
-                 train_stats['train_robust_loss'] / train_stats['train_n'],
-                 train_stats['train_robust_acc'] / train_stats['train_n'],
-                 test_stats['test_loss'] / test_stats['test_n'],
-                 test_stats['test_acc'] / test_stats['test_n'],
-                 test_stats['test_robust_loss'] / test_stats['test_n'],
-                 test_stats['test_robust_acc'] / test_stats['test_n'],
-                 0.0  # placeholder for any extra metric column if needed
-                 )
-
-    # If you have validation (args.val) and corresponding code, handle saving best val model here
-    # ... (your code for val-checking / saving best model) ...
-
-    # --- write metrics for this epoch (append) ---
-    if not os.path.exists(metrics_path):
-        with open(metrics_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "epoch",
-                "train_time",
-                "test_time",
-                "lr",
-                "train_loss",
-                "train_acc",
-                "train_robust_loss",
-                "train_robust_acc",
-                "test_loss",
-                "test_acc",
-                "test_robust_loss",
-                "test_robust_acc"
-            ])
-    with open(metrics_path, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            epoch_global,
-            train_time - t0,
-            test_time - train_time,
-            lr,
-            train_stats['train_loss'] / train_stats['train_n'],
-            train_stats['train_acc'] / train_stats['train_n'],
-            train_stats['train_robust_loss'] / train_stats['train_n'],
-            train_stats['train_robust_acc'] / train_stats['train_n'],
-            test_stats['test_loss'] / test_stats['test_n'],
-            test_stats['test_acc'] / test_stats['test_n'],
-            test_stats['test_robust_loss'] / test_stats['test_n'],
-            test_stats['test_robust_acc'] / test_stats['test_n'],
-        ])
-    # ------------------------------------------------
-
-    logging.info('================================================================')
-
-
+    
+        # adjust learning rate for this epoch
+        adjust_learning_rate(args, optimizer, main_epoch)
+    
+        # adversarial training for this epoch (returns per-epoch train metrics)
+        t0 = time.time()
+        train_stats = train(args, model, device, train_loader, optimizer, main_epoch, weighted_eps_list)
+        train_time = time.time()
+    
+        # compute global epoch index that matches your saved filename convention
+        epoch_global = args.warm_up + main_epoch
+    
+        # evaluate on test set (both clean & robust)
+        test_stats = evaluate_epoch(args, model, device, test_loader, attack=args.attack)
+        test_time = time.time()
+    
+        # Save checkpoints (latest + per epoch)
+        save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
+        torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
+        if epoch_global % args.save_freq == 0:
+            logging.info('Saved model at global epoch %d', epoch_global)
+    
+        # compute lr for logging
+        lr = optimizer.param_groups[0]['lr']
+    
+        # AWP-style logging line (same fields & format)
+        logging.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
+                     epoch_global,
+                     train_time - t0,
+                     test_time - train_time,
+                     lr,
+                     train_stats['train_loss'] / train_stats['train_n'],
+                     train_stats['train_acc'] / train_stats['train_n'],
+                     train_stats['train_robust_loss'] / train_stats['train_n'],
+                     train_stats['train_robust_acc'] / train_stats['train_n'],
+                     test_stats['test_loss'] / test_stats['test_n'],
+                     test_stats['test_acc'] / test_stats['test_n'],
+                     test_stats['test_robust_loss'] / test_stats['test_n'],
+                     test_stats['test_robust_acc'] / test_stats['test_n'],
+                     0.0  # placeholder for any extra metric column if needed
+                     )
+    
+        # If you have validation (args.val) and corresponding code, handle saving best val model here
+        # ... (your code for val-checking / saving best model) ...
+    
+        # --- write metrics for this epoch (append) ---
+        # avoid duplicate rows when resuming: check last epoch in file (if exists)
+        write_row = True
+        if os.path.exists(metrics_path):
+            try:
+                # read just the last line efficiently
+                with open(metrics_path, "rb") as f:
+                    f.seek(-1024, os.SEEK_END) if f.tell() > 1024 else f.seek(0)
+                    last = f.read().splitlines()[-1].decode('utf-8')
+                last_epoch = int(last.split(',')[0])
+                if last_epoch >= epoch_global:
+                    write_row = False
+            except Exception:
+                # if any problem reading last line, fall back to appending
+                write_row = True
+    
+        if not os.path.exists(metrics_path):
+            with open(metrics_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "epoch",
+                    "train_time",
+                    "test_time",
+                    "lr",
+                    "train_loss",
+                    "train_acc",
+                    "train_robust_loss",
+                    "train_robust_acc",
+                    "test_loss",
+                    "test_acc",
+                    "test_robust_loss",
+                    "test_robust_acc"
+                ])
+        if write_row:
+            with open(metrics_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    epoch_global,
+                    train_time - t0,
+                    test_time - train_time,
+                    lr,
+                    train_stats['train_loss'] / train_stats['train_n'],
+                    train_stats['train_acc'] / train_stats['train_n'],
+                    train_stats['train_robust_loss'] / train_stats['train_n'],
+                    train_stats['train_robust_acc'] / train_stats['train_n'],
+                    test_stats['test_loss'] / test_stats['test_n'],
+                    test_stats['test_acc'] / test_stats['test_n'],
+                    test_stats['test_robust_loss'] / test_stats['test_n'],
+                    test_stats['test_robust_acc'] / test_stats['test_n'],
+                ])
+        else:
+            logging.info("Skipping metrics write for epoch %d (already present in %s)", epoch_global, metrics_path)
+        # ------------------------------------------------
+    
+        logging.info('================================================================')
 
     # evaluation on adversarial examples
     modes = args.eval_modes.split(',')
@@ -715,6 +742,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
