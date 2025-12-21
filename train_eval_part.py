@@ -610,11 +610,11 @@ def main():
         main_epoch_start = start_epoch - args.warm_up
 
     for main_epoch in range(main_epoch_start, total_main_epochs + 1):
-    # optionally recompute weighted_eps_list periodically
-    if main_epoch % args.save_weights == 0 and main_epoch != 1:
-        weighted_eps_list = save_cam(model, train_loader, device, args)
-        # save logic...
-        logging.info("Saved weighted_eps for epoch %d", main_epoch)
+        # optionally recompute weighted_eps_list periodically
+        if main_epoch % args.save_weights == 0 and main_epoch != 1:
+            weighted_eps_list = save_cam(model, train_loader, device, args)
+            # save logic...
+            logging.info("Saved weighted_eps for epoch %d", main_epoch)
 
     # adjust learning rate for this epoch
     adjust_learning_rate(args, optimizer, main_epoch)
@@ -715,5 +715,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
