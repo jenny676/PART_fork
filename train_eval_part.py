@@ -651,21 +651,21 @@ def main():
         lr = optimizer.param_groups[0]['lr']
     
         # AWP-style logging line (same fields & format)
-        logging.info('%d \t %.1f \t \t %.1f \t \t %.4f \t %.4f \t %.4f \t %.4f \t \t %.4f \t \t %.4f \t %.4f \t %.4f \t \t %.4f',
-                     epoch_global,
-                     train_time - t0,
-                     test_time - train_time,
-                     lr,
-                     train_stats['train_loss'] / train_stats['train_n'],
-                     train_stats['train_acc'] / train_stats['train_n'],
-                     train_stats['train_robust_loss'] / train_stats['train_n'],
-                     train_stats['train_robust_acc'] / train_stats['train_n'],
-                     test_stats['test_loss'] / test_stats['test_n'],
-                     test_stats['test_acc'] / test_stats['test_n'],
-                     test_stats['test_robust_loss'] / test_stats['test_n'],
-                     test_stats['test_robust_acc'] / test_stats['test_n'],
-                     0.0  # placeholder for any extra metric column if needed
-                     )
+        logging.info(
+            f"{epoch_global:d}\t"
+            f"{(train_time - t0):.1f}\t\t"
+            f"{(test_time - train_time):.1f}\t\t"
+            f"{lr:.4f}\t"
+            f"{(train_stats['train_loss'] / train_stats['train_n']):.4f}\t"
+            f"{(train_stats['train_acc'] / train_stats['train_n']):.4f}\t"
+            f"{(train_stats['train_robust_loss'] / train_stats['train_n']):.4f}\t"
+            f"{(train_stats['train_robust_acc'] / train_stats['train_n']):.4f}\t\t"
+            f"{(test_stats['test_loss'] / test_stats['test_n']):.4f}\t"
+            f"{(test_stats['test_acc'] / test_stats['test_n']):.4f}\t"
+            f"{(test_stats['test_robust_loss'] / test_stats['test_n']):.4f}\t"
+            f"{(test_stats['test_robust_acc'] / test_stats['test_n']):.4f}\t\t"
+            f"{0.0:.4f}"
+        )
     
         # If you have validation (args.val) and corresponding code, handle saving best val model here
         # ... (your code for val-checking / saving best model) ...
@@ -742,6 +742,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
