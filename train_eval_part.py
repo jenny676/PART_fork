@@ -22,7 +22,6 @@ from dataset.svhn import SVHN
 from utils import *
 
 import multiprocessing
-import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -552,22 +551,21 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
     # setup data loader
+    # ---- REPLACEMENT DataLoader creation (CIFAR10 / SVHN) ----
+    def make_loader(dataset, batch_size, shuffle, is_train=True):
+        # dataset: a torch Dataset (not a DataLoader)
+        # returns a DataLoader with tuned params (no change to semantics)
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=DEFAULT_NUM_WORKERS,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+            drop_last=False
+        )
     if args.data == 'CIFAR10':
-        # ---- REPLACEMENT DataLoader creation (CIFAR10 / SVHN) ----
-        def make_loader(dataset, batch_size, shuffle, is_train=True):
-            # dataset: a torch Dataset (not a DataLoader)
-            # returns a DataLoader with tuned params (no change to semantics)
-            return torch.utils.data.DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                num_workers=DEFAULT_NUM_WORKERS,
-                pin_memory=True,
-                persistent_workers=True,
-                prefetch_factor=2,
-                drop_last=False
-            )
-        
         # If your CIFAR10() class returns DataLoader objects, extract the dataset:
         c10 = CIFAR10(train_batch_size=args.batch_size)
         # c10.train_data() previously returned a DataLoader; get the dataset object instead if available.
@@ -575,7 +573,7 @@ def main():
         orig_train_loader = c10.train_data()
         train_dataset = orig_train_loader.dataset
         train_loader = make_loader(train_dataset, batch_size=args.batch_size, shuffle=True, is_train=True)
-        
+            
         orig_test_loader = c10.test_data()
         test_dataset = orig_test_loader.dataset
         test_loader = make_loader(test_dataset, batch_size=args.batch_size, shuffle=False, is_train=False)
@@ -622,9 +620,11 @@ def main():
             train_subset,
             batch_size=getattr(train_loader, 'batch_size', args.batch_size),
             shuffle=True,
-            num_workers=getattr(train_loader, 'num_workers', 4),
-            pin_memory=getattr(train_loader, 'pin_memory', True),
-            drop_last=getattr(train_loader, 'drop_last', False)
+            num_workers=DEFAULT_NUM_WORKERS,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+            drop_last=False
         )
         logging.info("Using %d/%d training samples (%.2f%%) for training",
                      num_use, num_train, args.train_percent)
@@ -672,22 +672,24 @@ def main():
     # compute or reload weighted_eps_list
     if weighted_eps_list is None:
         weighted_eps_list = save_cam(model, train_loader, device, args)
-        # save latest weighted eps list
+    
+        # convert to CPU numpy and save (unchanged)
         def to_cpu_numpy(x):
             if torch.is_tensor(x):
                 return x.detach().cpu().numpy()
             return x
-
         weighted_eps_list_cpu = [to_cpu_numpy(w) for w in weighted_eps_list]
-
         safe_numpy_save(
             os.path.join(model_dir, 'weighted_eps_latest.npy'),
             np.array(weighted_eps_list_cpu, dtype=object),
             allow_pickle=True
         )
-
+    
+        # IMPORTANT: convert the newly-computed list to device tensors so inner loop stays fast
+        weighted_eps_list = ensure_weighted_eps_on_device(weighted_eps_list, device)
     else:
         logging.info("Using weighted_eps_list loaded from checkpoint")
+
 
     # main training phase
     total_main_epochs = args.epochs - args.warm_up
@@ -833,6 +835,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
