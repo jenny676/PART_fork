@@ -171,6 +171,7 @@ parser.add_argument(
     default=100.0,
     help='Percent of training data to use (0 < p <= 100)'
 )
+parser.add_argument('--smoke-test', action='store_true', help='Run quick smoke test and exit')
 parser.add_argument('--epochs', type=int, default=80, metavar='N',
                     help='number of epochs to train (total, including warm-up)')
 parser.add_argument('--eval-modes', type=str, default='all',
@@ -654,6 +655,68 @@ def main():
     weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
     weighted_eps_list = safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
     weighted_eps_list = ensure_weighted_eps_on_device(weighted_eps_list, device)
+    # --- SMOKE TEST: paste here in main() AFTER loaders, model, optimizer, weighted_eps_list are ready ---
+    # add CLI arg at top: parser.add_argument('--smoke-test', action='store_true', help='Run quick smoke test and exit')
+    
+    if getattr(args, 'smoke_test', False):
+        logging.info("Running smoke test (one batch)...")
+    
+        # 1) check dataloader yields a batch and devices
+        batch = next(iter(train_loader))
+        data, label = batch
+        data = data.to(device, non_blocking=True)
+        label = label.to(device, non_blocking=True).long()
+        logging.info("Batch shapes: data=%s label=%s", tuple(data.shape), tuple(label.shape))
+        logging.info("Data device: %s, Label device: %s", data.device, label.device)
+    
+        # 2) check weighted_eps_list structure and device (if present)
+        if weighted_eps_list is None:
+            logging.info("weighted_eps_list is None (OK if you expect to recompute).")
+        else:
+            try:
+                w0 = weighted_eps_list[0]
+                logging.info("weighted_eps_list[0] type=%s; is_tensor=%s; device=%s",
+                             type(w0), torch.is_tensor(w0), getattr(w0, 'device', 'N/A'))
+            except Exception as e:
+                logging.exception("Error inspecting weighted_eps_list: %s", e)
+    
+        # 3) run a single call to your attack routine to ensure no device-copy errors
+        model.eval()
+        try:
+            # pass weighted_eps for first batch if available, else None
+            example_w = None
+            if weighted_eps_list is not None:
+                try:
+                    example_w = weighted_eps_list[0]
+                except Exception:
+                    example_w = None
+    
+            if args.attack == 'pgd':
+                data_adv = part_pgd(model, data, label, example_w,
+                                    epsilon=args.epsilon, num_steps=args.num_steps, step_size=args.step_size)
+            else:
+                data_adv = part_mma(model, data, label, example_w,
+                                    epsilon=args.epsilon, num_steps=args.num_steps, step_size=args.step_size,
+                                    rand_init=args.rand_init, k=3, num_classes=args.num_class)
+    
+            logging.info("Attack produced data_adv shape=%s device=%s", tuple(data_adv.shape), data_adv.device)
+        except Exception:
+            logging.exception("Attack call failed during smoke test.")
+            raise
+    
+        # 4) forward pass and small backward to ensure optimizer works (use small loss)
+        model.train()
+        optimizer.zero_grad()
+        out = model(data_adv)
+        loss = F.cross_entropy(out, label)
+        loss.backward()
+        optimizer.step()
+        logging.info("Forward+backward succeeded. loss=%.6f", loss.item())
+    
+        logging.info("Smoke test passed — exiting.")
+        return  # exit main() so script stops after smoke test
+    # --- end smoke test snippet ---
+
     
     # warm up phase
     warmup_start = start_epoch if start_epoch <= args.warm_up else args.warm_up + 1
@@ -835,6 +898,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
