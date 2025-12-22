@@ -21,6 +21,9 @@ from dataset.svhn import SVHN
 
 from utils import *
 
+import multiprocessing
+import os
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # CIFAR normalization (same as dataset)
@@ -53,6 +56,29 @@ def safe_numpy_save(path, arr, allow_pickle=True):
         except Exception:
             pass
         raise
+
+# ---- ADD HELPER (place near other helpers) ----
+def ensure_weighted_eps_on_device(w_list, device):
+    """Convert elements of weighted_eps_list to torch tensors on `device`.
+       This runs once at load time and avoids CPU<->GPU round-trips in training.
+    """
+    if w_list is None:
+        return None
+    res = []
+    for w in w_list:
+        if torch.is_tensor(w):
+            res.append(w.to(device))
+        else:
+            # coerce numpy / python objects into tensor once
+            try:
+                # try converting object to a numeric array then tensor
+                arr = np.asarray(w)
+                res.append(torch.from_numpy(arr).to(device))
+            except Exception:
+                # fallback: make a tensor out of the python object (may be 0-d or object dtype)
+                res.append(torch.as_tensor(w).to(device))
+    return res
+# ------------------------------------------------
 
 def safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args):
     """Try to load weighted_eps; if missing/corrupt or ill-sized, recompute and save atomically.
@@ -337,19 +363,39 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
         train_n += batch_size
 
         # get weighted eps for this batch if available (your existing logic)
-        if args.pre_trained:
-            try:
-                weighted_eps = torch.from_numpy(weighted_eps_list[f'arr_{batch_idx}']).to(device)
-            except Exception:
-                logging.debug("pre_trained weighted_eps lookup failed for batch %d", batch_idx)
-                weighted_eps = None
-        else:
-            weighted_eps = None
-            if weighted_eps_list is not None:
+        # ---- FAST weighted_eps lookup (no CPU<->GPU conversions in inner loop) ----
+        weighted_eps = None
+        if weighted_eps_list is not None:
+            if args.pre_trained:
+                # if your pre-trained scheme stores entries keyed by name, try to fetch safely
+                try:
+                    # prefer direct indexing if list-like; if dict-like, allow both
+                    if isinstance(weighted_eps_list, (list, tuple)):
+                        # fallback if someone stored arr_{i} strings: try numeric index first
+                        if batch_idx < len(weighted_eps_list):
+                            weighted_eps = weighted_eps_list[batch_idx]
+                        else:
+                            weighted_eps = None
+                    elif isinstance(weighted_eps_list, dict):
+                        weighted_eps = weighted_eps_list.get(f'arr_{batch_idx}', None)
+                    else:
+                        # generic sequence/datastructure: try indexing
+                        try:
+                            weighted_eps = weighted_eps_list[batch_idx]
+                        except Exception:
+                            weighted_eps = None
+                except Exception:
+                    logging.debug("pre_trained weighted_eps lookup failed for batch %d", batch_idx)
+                    weighted_eps = None
+            else:
+                # typical case: weighted_eps_list is list/sequence with one entry per training sample or per batch
                 try:
                     if len(weighted_eps_list) == len(train_loader):
+                        # per-batch list (fast)
                         weighted_eps = weighted_eps_list[batch_idx]
                     else:
+                        # per-sample list: compute indices (this is a pure-Python index list -> then stack)
+                        # avoid per-sample .cpu/.numpy by stacking already-device tensors
                         if hasattr(train_loader.dataset, 'indices'):
                             all_indices = train_loader.dataset.indices
                         else:
@@ -357,15 +403,23 @@ def train(args, model, device, train_loader, optimizer, epoch, weighted_eps_list
                         start = batch_idx * train_loader.batch_size
                         end = start + data.size(0)
                         batch_sample_indices = all_indices[start:end]
+                        # gather per-sample tensors (they are already on device)
                         batch_w = [weighted_eps_list[i] for i in batch_sample_indices]
                         if len(batch_w) > 0 and torch.is_tensor(batch_w[0]):
-                            weighted_eps = torch.stack([w.to(device) for w in batch_w])
+                            # stack into a batch tensor if possible
+                            try:
+                                weighted_eps = torch.stack(batch_w)
+                            except Exception:
+                                # if shapes differ, keep as list of tensors (attack should handle list)
+                                weighted_eps = batch_w
                         else:
-                            weighted_eps = [torch.as_tensor(w).to(device) if not torch.is_tensor(w) else w.to(device)
-                                            for w in batch_w]
+                            # if stored as non-tensor objects, coerce once (they should have been converted earlier)
+                            weighted_eps = [torch.as_tensor(w).to(device) if not torch.is_tensor(w) else w for w in batch_w]
                 except Exception as e:
                     logging.warning("Could not index weighted_eps_list for batch %d: %s", batch_idx, repr(e))
                     weighted_eps = None
+        # ---- end fast lookup ----
+
 
         # compute clean outputs for train metrics (forward in train mode)
         with torch.no_grad():
@@ -483,13 +537,49 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if use_cuda else "cpu")
 
+    # ---- ADD AT START OF main(), before DataLoader creation ----
+    # limit CPU threads to avoid oversubscription when using many DataLoader workers
+    # keeps numeric results identical but reduces context switching overhead
+    torch.set_num_threads(2)          # tune 1-4 depending on your machine
+    os.environ["OMP_NUM_THREADS"] = "2"
+    
+    # determine a sane default for num_workers for DataLoader (tuneable)
+    cpu_count = multiprocessing.cpu_count()
+    DEFAULT_NUM_WORKERS = min(8, max(1, cpu_count // 2))  # start here; adapt if needed
+    # ----------------------------------------
+
     # optionally set CUDA devices (if you want to override)
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
     # setup data loader
     if args.data == 'CIFAR10':
-        train_loader = CIFAR10(train_batch_size=args.batch_size).train_data()
-        test_loader = CIFAR10(test_batch_size=args.batch_size).test_data()
+        # ---- REPLACEMENT DataLoader creation (CIFAR10 / SVHN) ----
+        def make_loader(dataset, batch_size, shuffle, is_train=True):
+            # dataset: a torch Dataset (not a DataLoader)
+            # returns a DataLoader with tuned params (no change to semantics)
+            return torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=DEFAULT_NUM_WORKERS,
+                pin_memory=True,
+                persistent_workers=True,
+                prefetch_factor=2,
+                drop_last=False
+            )
+        
+        # If your CIFAR10() class returns DataLoader objects, extract the dataset:
+        c10 = CIFAR10(train_batch_size=args.batch_size)
+        # c10.train_data() previously returned a DataLoader; get the dataset object instead if available.
+        # If CIFAR10.train_data() returns a DataLoader with attribute .dataset, do:
+        orig_train_loader = c10.train_data()
+        train_dataset = orig_train_loader.dataset
+        train_loader = make_loader(train_dataset, batch_size=args.batch_size, shuffle=True, is_train=True)
+        
+        orig_test_loader = c10.test_data()
+        test_dataset = orig_test_loader.dataset
+        test_loader = make_loader(test_dataset, batch_size=args.batch_size, shuffle=False, is_train=False)
+        # -----------------------------------------------------------
         if args.model == 'resnet':
             model_dir = './checkpoint/CIFAR10/ResNet_18/PART'
             model = ResNet18(num_classes=10)
@@ -563,6 +653,7 @@ def main():
 
     weighted_eps_path = os.path.join(model_dir, 'weighted_eps_latest.npy')
     weighted_eps_list = safe_load_weighted_eps(weighted_eps_path, model, train_loader, device, args)
+    weighted_eps_list = ensure_weighted_eps_on_device(weighted_eps_list, device)
     
     # warm up phase
     warmup_start = start_epoch if start_epoch <= args.warm_up else args.warm_up + 1
@@ -742,6 +833,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
