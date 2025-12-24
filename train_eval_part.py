@@ -7,9 +7,6 @@ import logging
 import tempfile
 import shutil
 
-import math
-from itertools import islice
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -771,99 +768,48 @@ def main():
     else:
         main_epoch_start = start_epoch - args.warm_up
 
+    # ----------------- REVERTED: main training loop (full eval every epoch) -----------------
     for main_epoch in range(main_epoch_start, total_main_epochs + 1):
-        # optionally recompute weighted_eps_list periodically (your existing code) ...
+        # optionally recompute weighted_eps_list periodically (your existing code)
+        if main_epoch % args.save_weights == 0 and main_epoch != 1:
+            weighted_eps_list = save_cam(model, train_loader, device, args)
+            w_cpu = []
+            for w in weighted_eps_list:
+                if torch.is_tensor(w):
+                    w_cpu.append(w.detach().cpu().numpy())
+                else:
+                    w_cpu.append(np.array(w, dtype=object))
+            safe_numpy_save(os.path.join(model_dir, f'weighted_eps_epoch{main_epoch}.npy'),
+                            np.array(w_cpu, dtype=object))
+            safe_numpy_save(os.path.join(model_dir, 'weighted_eps_latest.npy'),
+                            np.array(w_cpu, dtype=object))
+            logging.info("Saved weighted_eps for epoch %d", main_epoch)
+    
+        # adjust learning rate for this epoch
         adjust_learning_rate(args, optimizer, main_epoch)
     
+        # adversarial training for this epoch (returns per-epoch train metrics)
         t0 = time.time()
         train_stats = train(args, model, device, train_loader, optimizer, main_epoch, weighted_eps_list)
         train_time = time.time()
     
+        # compute global epoch index that matches your saved filename convention
         epoch_global = args.warm_up + main_epoch
     
-        # 1) fast clean evaluation every epoch (no attacks) --------------------
-        # This iterates the test_loader once and computes clean loss/acc
-        model.eval()
-        test_loss = 0.0
-        test_acc = 0
-        test_n = 0
-        with torch.no_grad():
-            for data, label in test_loader:
-                data = data.to(device, non_blocking=True)
-                label = label.to(device, non_blocking=True).long()
-                bs = data.size(0)
-                test_n += bs
-                out_clean = model(data)
-                test_loss += F.cross_entropy(out_clean, label, reduction='sum').item()
-                pred = out_clean.max(1)[1]
-                test_acc += pred.eq(label).sum().item()
-        # convert sums->averages for logging later if needed
-        clean_test_loss = test_loss / test_n
-        clean_test_acc  = test_acc / test_n
+        # evaluate on test set (both clean & robust) - ORIGINAL: run every epoch
+        test_stats = evaluate_epoch(args, model, device, test_loader, attack=args.attack)
         test_time = time.time()
     
-        # 2) decide whether to run robust eval this epoch -----------------------
-        do_robust = (main_epoch % ROBUST_EVAL_FREQ == 0)
-        if do_robust:
-            logging.info("Running robust eval (attack=%s) at global epoch %d", args.attack, epoch_global)
-            # If you want a subset to speed up checks, make an iterator slice:
-            if isinstance(ROBUST_EVAL_SUBSET, int):
-                subset_iter = islice(test_loader, ROBUST_EVAL_SUBSET)
-            else:
-                subset_iter = test_loader
-    
-            # A small robust-eval function that mirrors your evaluate_epoch logic but supports subset
-            def robust_eval_on_loader(model, device, loader, attack):
-                model.eval()
-                r_loss = 0.0
-                r_acc = 0
-                r_n = 0
-                for data, label in loader:
-                    data = data.to(device, non_blocking=True)
-                    label = label.to(device, non_blocking=True).long()
-                    bs = data.size(0)
-                    r_n += bs
-    
-                    # generate adversarial examples using your existing attack helpers
-                    if attack == 'pgd':
-                        data_adv = part_pgd(model, data, label, None,
-                                            epsilon=args.epsilon, num_steps=args.num_steps, step_size=args.step_size)
-                    elif attack == 'mma':
-                        data_adv = part_mma(model, data, label, None,
-                                            epsilon=args.epsilon, num_steps=args.num_steps, step_size=args.step_size,
-                                            rand_init=args.rand_init, k=3, num_classes=args.num_class)
-                    else:
-                        raise ValueError("Unknown attack for evaluation")
-    
-                    with torch.no_grad():
-                        out_adv = model(data_adv)
-                        r_loss += F.cross_entropy(out_adv, label, reduction='sum').item()
-                        pred_adv = out_adv.max(1)[1]
-                        r_acc += pred_adv.eq(label).sum().item()
-                return {
-                    'test_robust_loss': r_loss,
-                    'test_robust_acc': r_acc,
-                    'test_n': r_n
-                }
-    
-            robust_stats = robust_eval_on_loader(model, device, subset_iter, args.attack)
-            # convert to averages
-            robust_test_loss = robust_stats['test_robust_loss'] / robust_stats['test_n']
-            robust_test_acc  = robust_stats['test_robust_acc'] / robust_stats['test_n']
-            test_time = time.time()
-        else:
-            # Skip expensive robust check; mark robust metrics as NaN
-            robust_test_loss = math.nan
-            robust_test_acc  = math.nan
-    
-        # 3) save checkpoints + logging similar to before -----------------------
+        # Save checkpoints (latest + per epoch)
         save_checkpoint(os.path.join(model_dir, 'latest.pth'), model, optimizer, epoch_global)
         torch.save(model.state_dict(), os.path.join(model_dir, f'part_epoch{epoch_global}.pth'))
         if epoch_global % args.save_freq == 0:
             logging.info('Saved model at global epoch %d', epoch_global)
     
+        # compute lr for logging
         lr = optimizer.param_groups[0]['lr']
     
+        # AWP-style logging line (same fields & format as original)
         logging.info(
             f"{epoch_global:d}\t"
             f"{(train_time - t0):.1f}\t\t"
@@ -873,14 +819,29 @@ def main():
             f"{(train_stats['train_acc'] / train_stats['train_n']):.4f}\t"
             f"{(train_stats['train_robust_loss'] / train_stats['train_n']):.4f}\t"
             f"{(train_stats['train_robust_acc'] / train_stats['train_n']):.4f}\t\t"
-            f"{clean_test_loss:.4f}\t"
-            f"{clean_test_acc:.4f}\t"
-            f"{(robust_test_loss if not math.isnan(robust_test_loss) else 0.0):.4f}\t"
-            f"{(robust_test_acc  if not math.isnan(robust_test_acc)  else 0.0):.4f}\t\t"
+            f"{(test_stats['test_loss'] / test_stats['test_n']):.4f}\t"
+            f"{(test_stats['test_acc'] / test_stats['test_n']):.4f}\t"
+            f"{(test_stats['test_robust_loss'] / test_stats['test_n']):.4f}\t"
+            f"{(test_stats['test_robust_acc'] / test_stats['test_n']):.4f}\t\t"
             f"{0.0:.4f}"
         )
     
-        # 4) write metrics CSV: use NaN for robust columns when skipped -----------
+        # --- write metrics for this epoch (append) ---
+        # avoid duplicate rows when resuming: check last epoch in file (if exists)
+        write_row = True
+        if os.path.exists(metrics_path):
+            try:
+                # read just the last line efficiently
+                with open(metrics_path, "rb") as f:
+                    f.seek(-1024, os.SEEK_END) if f.tell() > 1024 else f.seek(0)
+                    last = f.read().splitlines()[-1].decode('utf-8')
+                last_epoch = int(last.split(',')[0])
+                if last_epoch >= epoch_global:
+                    write_row = False
+            except Exception:
+                # if any problem reading last line, fall back to appending
+                write_row = True
+    
         if not os.path.exists(metrics_path):
             with open(metrics_path, "w", newline="") as f:
                 writer = csv.writer(f)
@@ -893,24 +854,11 @@ def main():
                     "train_acc",
                     "train_robust_loss",
                     "train_robust_acc",
-                    "test_loss_clean",
-                    "test_acc_clean",
-                    "test_loss_robust",
+                    "test_loss",
+                    "test_acc",
+                    "test_robust_loss",
                     "test_acc_robust"
                 ])
-        # guard to avoid duplicate rows when resuming (keeps your existing logic)
-        write_row = True
-        if os.path.exists(metrics_path):
-            try:
-                with open(metrics_path, "rb") as f:
-                    f.seek(-1024, os.SEEK_END) if f.tell() > 1024 else f.seek(0)
-                    last = f.read().splitlines()[-1].decode('utf-8')
-                last_epoch = int(last.split(',')[0])
-                if last_epoch >= epoch_global:
-                    write_row = False
-            except Exception:
-                write_row = True
-    
         if write_row:
             with open(metrics_path, "a", newline="") as f:
                 writer = csv.writer(f)
@@ -923,15 +871,18 @@ def main():
                     train_stats['train_acc'] / train_stats['train_n'],
                     train_stats['train_robust_loss'] / train_stats['train_n'],
                     train_stats['train_robust_acc'] / train_stats['train_n'],
-                    clean_test_loss,
-                    clean_test_acc,
-                    (robust_test_loss if not math.isnan(robust_test_loss) else ""),
-                    (robust_test_acc  if not math.isnan(robust_test_acc)  else ""),
+                    test_stats['test_loss'] / test_stats['test_n'],
+                    test_stats['test_acc'] / test_stats['test_n'],
+                    test_stats['test_robust_loss'] / test_stats['test_n'],
+                    test_stats['test_robust_acc'] / test_stats['test_n'],
                 ])
         else:
             logging.info("Skipping metrics write for epoch %d (already present in %s)", epoch_global, metrics_path)
+        # ------------------------------------------------
     
         logging.info('================================================================')
+    # ----------------- end reverted loop -----------------
+
 
     # evaluation on adversarial examples
     modes = args.eval_modes.split(',')
@@ -949,6 +900,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
